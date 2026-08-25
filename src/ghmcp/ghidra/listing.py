@@ -95,6 +95,47 @@ def lookup_function(program: object, name_or_addr: str) -> object:
     )
 
 
+def lookup_symbol(program: object, name_or_addr: str) -> object:
+    """Resolve a symbol (label/data/function) by name or address; raises on a miss.
+
+    Address → primary symbol at that address; else name → exact → case-insensitive
+    exact → first prefix, via the SymbolTable.
+    """
+    name_or_addr = name_or_addr.strip()
+    if not name_or_addr:
+        raise BadTarget("empty symbol target", hint="pass a name or address")
+    addr = None
+    try:
+        value = parse_address(name_or_addr)
+        addr = program.getAddressFactory().getDefaultAddressSpace().getAddress(value)
+    except BadTarget:
+        pass
+    st = program.getSymbolTable()
+    if addr is not None:
+        sym = st.getSymbol(addr)
+        if sym is not None:
+            return sym
+    low = name_or_addr.lower()
+    ci_exact = None
+    fallback = None
+    for sym in st.getAllSymbols(False) or []:
+        n = str(sym.getName())
+        if n == name_or_addr:
+            return sym
+        if n.lower() == low:
+            ci_exact = ci_exact or sym
+        elif n.lower().startswith(low) and fallback is None:
+            fallback = sym
+    if ci_exact is not None:
+        return ci_exact
+    if fallback is not None:
+        return fallback
+    raise NotFound(
+        f"no symbol at or named {name_or_addr!r}",
+        hint="check the exact name with find_symbols, or pass a plain address",
+    )
+
+
 def _address(program: object, text: str) -> object:
     if text.strip() == "":
         return None

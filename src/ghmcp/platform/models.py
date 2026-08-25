@@ -69,9 +69,11 @@ class Insn(Model):
 
 
 class Ref(Model):
-    address: int  # the other end of the reference
-    kind: str = ""
-    source: int | None = None  # referencing instruction/location, null for data refs
+    address: int  # the other end of the reference (the navigate-to address)
+    kind: str = ""  # flow | data | computed | other
+    source: int | None = None  # addressing location that holds the reference
+    label: str | None = None  # symbol name at `address`, when resolvable
+    target: int | None = None  # index of the request-level target this ref belongs to
 
 
 class Symbol(Model):
@@ -134,9 +136,11 @@ class InstructionsRequest(Model):
 
 
 class RefsRequest(Model):
-    targets: list[str]
+    """Resolved reference sweep: targets are closed [start, end] ranges (end == start for a point)."""
+
+    targets: list[tuple[int, int]]
     direction: str = "to"  # to | from | both
-    kinds: list[str] = []
+    kinds: list[str] = []  # filter: flow | data | computed
     offset: int = 0
     limit: int = 100
     program: str | None = None
@@ -200,6 +204,29 @@ class CommentRequest(Model):
     text: str
     batch: dict[str, str] | None = None  # address -> text when batch is requested
     program: str | None = None
+
+
+class FunctionBrief(Model):
+    name: str
+    address: int
+    depth: int = 0
+    via: str = ""  # parent name on the traversed path
+
+
+class CallGraphRequest(Model):
+    target: str
+    program: str | None = None
+    direction: str = "callees"  # callers | callees | both
+    depth: int = 1
+    path_to: str | None = None
+
+
+class CallGraphPage(Model):
+    root: FunctionBrief | None = None
+    callers: list[FunctionBrief] = []
+    callees: list[FunctionBrief] = []
+    path: list[FunctionBrief] = []
+    truncated: bool = False
 
 
 class DiffRequest(Model):

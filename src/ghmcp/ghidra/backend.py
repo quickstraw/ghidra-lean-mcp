@@ -11,6 +11,8 @@ import contextlib
 from pathlib import Path
 
 from ghmcp.ghidra.protocols import (
+    CallGraphPage,
+    CallGraphRequest,
     CommentRequest,
     DecompileRequest,
     EnvInfo,
@@ -24,7 +26,7 @@ from ghmcp.ghidra.protocols import (
     StringQuery,
     SymbolQuery,
 )
-from ghmcp.platform.errors import GhmcpError, NotFound
+from ghmcp.platform.errors import GhmcpError, NotFound, ReadOnly
 from ghmcp.platform.telemetry import log_event
 
 
@@ -57,6 +59,21 @@ class GhidraBackend:
         self._sessions = SessionManager()
         self._project_mgr = ProjectManager(Path(self._settings.projects_dir))
         self._decompool = DecompPool(self._settings)
+
+    def _write(self, entry: object, description: str, fn):
+        """Run a write inside a transaction; requite a writable session and
+        record the mutation so the decompile/store cache invalidates (plan §5.2)."""
+        if not bool((entry.open_flags or {}).get("writable")):
+            raise ReadOnly(
+                "this program was opened read-only",
+                hint="re-open with open_program(writable=true) to annotate",
+            )
+        from ghmcp.runtime.txn import txn
+
+        with txn(entry.program, description):
+            result = fn()
+        entry.bump_mod(self._mod(entry.program))
+        return result
 
     # ------------------------------------------------------------------ env
 
@@ -274,77 +291,191 @@ class GhidraBackend:
 
     # ------------------------------------------------------------------ xrefs/symbols (M4)
 
-    def refs(self, pid: str, request: RefsRequest) -> list[object]:
-        raise NotImplementedError("refs: M4")
+    def refs(self, pid: str, request: RefsRequest) -> tuple[list[object], bool]:
+        self._bootstrap()
+        from ghmcp.ghidra.refs import refs_page
+
+        entry = self._sessions.get(pid)
+        return refs_page(entry.program, request)
 
     def symbols(self, pid: str, request: SymbolQuery) -> tuple[list[object], bool]:
-        raise NotImplementedError("symbols: M4")
+        self._bootstrap()
+        from ghmcp.ghidra.symbols import symbols_page
+
+        entry = self._sessions.get(pid)
+        return symbols_page(entry.program, request)
 
     def strings(self, pid: str, request: StringQuery) -> tuple[list[object], bool]:
-        raise NotImplementedError("strings: M4")
+        self._bootstrap()
+        from ghmcp.ghidra.strings import strings_page
+
+        entry = self._sessions.get(pid)
+        return strings_page(entry.program, request)
+
+    def call_graph(self, pid: str, request: CallGraphRequest) -> CallGraphPage:
+        self._bootstrap()
+        from ghmcp.ghidra.callgraph import call_graph
+
+        entry = self._sessions.get(pid)
+        return call_graph(entry, request)
 
     # ------------------------------------------------------------------ search (M5)
 
     def find(self, pid: str, request: SearchQuery) -> list[object]:
-        raise NotImplementedError("find: M5")
+        self._bootstrap()
+        from ghmcp.ghidra.search import search_page
 
-    # ------------------------------------------------------------------ write (M6)
-
-    def rename(self, pid: str, request: RenameRequest) -> None:
-        raise NotImplementedError("rename: M6")
-
-    def set_prototype(self, pid: str, request: PrototypeRequest) -> None:
-        raise NotImplementedError("set_prototype: M6")
-
-    def set_comment(self, pid: str, request: CommentRequest) -> None:
-        raise NotImplementedError("set_comment: M6")
-
-    def define_types(self, pid: str, c_decl: str) -> list[str]:
-        raise NotImplementedError("define_types: M6")
-
-    def apply_type(self, pid: str, address: int, c_type: str, variable: str | None) -> None:
-        raise NotImplementedError("apply_type: M6")
-
-    # ------------------------------------------------------------------ game specials (M7)
-
-    def memory_map(self, pid: str) -> list[dict]:
-        raise NotImplementedError("memory_map: M7")
-
-    def create_block(self, pid: str, name: str, address: int, size: int, flags: str) -> None:
-        raise NotImplementedError("create_block: M7")
-
-    def rebase(self, pid: str, new_base: int) -> None:
-        raise NotImplementedError("rebase: M7")
-
-    def diff_functions(self, a_pid: str, b_pid: str) -> dict:
-        raise NotImplementedError("diff_functions: M7")
-
-    def diff_bytes(self, a_pid: str, b_pid: str, start: int, end: int) -> dict:
-        raise NotImplementedError("diff_bytes: M7")
-
-    def analysis_state(self, pid: str) -> str:
-        raise NotImplementedError("analysis_state: M7")
-
-    def run_analysis(self, pid: str, options: dict) -> None:
-        raise NotImplementedError("run_analysis: M7")
-
-    def analysis_options(self, pid: str) -> dict:
-        raise NotImplementedError("analysis_options: M7")
+        entry = self._sessions.get(pid)
+        return search_page(entry.program, request)
 
     # ------------------------------------------------------------------ scripts (M5)
 
     def run_script(
         self, pid: str | None, kind: str, code: str | None, path: str | None, args: list[str]
     ) -> dict:
-        raise NotImplementedError("run_script: M5")
+        self._bootstrap()
+        from ghmcp.ghidra.script import run_script
+
+        entry = self._sessions.get(pid) if pid else self._sessions.current_entry()
+        if entry is None:
+            raise GhmcpError("no program open for run_script", hint="open_program first")
+        return run_script(entry, kind, code, path, args)
+
+    # ------------------------------------------------------------------ write (M6)
+
+    def rename(self, pid: str, request: RenameRequest) -> None:
+        self._bootstrap()
+        from ghmcp.ghidra.annotate import rename
+
+        entry = self._sessions.get(pid)
+        self._write(entry, "ghmcp: rename", lambda: rename(entry.program, request))
+
+    def set_prototype(self, pid: str, request: PrototypeRequest) -> None:
+        self._bootstrap()
+        from ghmcp.ghidra.annotate import set_prototype
+
+        entry = self._sessions.get(pid)
+        self._write(
+            entry, "ghmcp: set_prototype", lambda: set_prototype(entry.program, request)
+        )
+
+    def set_comment(self, pid: str, request: CommentRequest) -> None:
+        self._bootstrap()
+        from ghmcp.ghidra.annotate import set_comment
+
+        entry = self._sessions.get(pid)
+        self._write(entry, "ghmcp: set_comment", lambda: set_comment(entry.program, request))
+
+    def define_types(self, pid: str, c_decl: str) -> list[str]:
+        self._bootstrap()
+        from ghmcp.ghidra.annotate import define_types
+
+        entry = self._sessions.get(pid)
+        return self._write(
+            entry, "ghmcp: define_types", lambda: define_types(entry.program, c_decl)
+        )
+
+    def apply_type(self, pid: str, address: int, c_type: str, variable: str | None) -> None:
+        self._bootstrap()
+        from ghmcp.ghidra.annotate import apply_type
+
+        entry = self._sessions.get(pid)
+        self._write(
+            entry,
+            "ghmcp: apply_type",
+            lambda: apply_type(entry.program, address, c_type, variable),
+        )
+
+    def list_types(self, pid: str) -> list[str]:
+        self._bootstrap()
+        from ghmcp.ghidra.annotate import list_types
+
+        entry = self._sessions.get(pid)
+        return list_types(entry.program)
+
+    def get_type(self, pid: str, name: str) -> dict:
+        self._bootstrap()
+        from ghmcp.ghidra.annotate import get_type
+
+        entry = self._sessions.get(pid)
+        return get_type(entry.program, name)
+
+    # ------------------------------------------------------------------ game specials (M7)
+
+    def memory_map(self, pid: str) -> list[dict]:
+        self._bootstrap()
+        from ghmcp.ghidra.game import memory_map
+
+        entry = self._sessions.get(pid)
+        return memory_map(entry)
+
+    def create_block(self, pid: str, name: str, address: int, size: int, flags: str) -> None:
+        self._bootstrap()
+        from ghmcp.ghidra.game import create_block
+
+        entry = self._sessions.get(pid)
+        self._write(entry, "ghmcp: create_block", lambda: create_block(entry, name, address, size, flags))
+
+    def rebase(self, pid: str, new_base: int) -> None:
+        self._bootstrap()
+        from ghmcp.ghidra.game import rebase
+
+        entry = self._sessions.get(pid)
+        self._write(entry, "ghmcp: rebase", lambda: rebase(entry, new_base))
+
+    def diff_functions(self, a_pid: str, b_pid: str) -> dict:
+        self._bootstrap()
+        from ghmcp.ghidra.game import diff_functions
+
+        return diff_functions(self._sessions.get(a_pid), self._sessions.get(b_pid))
+
+    def diff_bytes(self, a_pid: str, b_pid: str, start: int, end: int) -> dict:
+        self._bootstrap()
+        from ghmcp.ghidra.game import diff_bytes
+
+        return diff_bytes(
+            self._sessions.get(a_pid).program, self._sessions.get(b_pid).program, start, end
+        )
+
+    def analysis_state(self, pid: str) -> str:
+        self._bootstrap()
+        from ghmcp.ghidra.game import analysis_state
+
+        return analysis_state(self._sessions.get(pid))
+
+    def run_analysis(self, pid: str, options: dict) -> None:
+        self._bootstrap()
+        from ghmcp.ghidra.game import run_analysis
+
+        entry = self._sessions.get(pid)
+        run_analysis(entry, options)
+        entry.bump_mod(self._mod(entry.program))
+
+    def analysis_options(self, pid: str) -> dict:
+        self._bootstrap()
+        from ghmcp.ghidra.game import analysis_options
+
+        return analysis_options(self._sessions.get(pid))
 
     # ------------------------------------------------------------------ tasks (M7)
 
     def analyze_async(self, pid: str, options: dict | None) -> str:
-        raise NotImplementedError("analyze_async: M7")
+        self._bootstrap()
+        from ghmcp.runtime import tasks
+
+        entry = self._sessions.get(pid)
+
+        def job():
+            from ghmcp.ghidra.game import run_analysis
+
+            run_analysis(entry, options)
+
+        return tasks.start_task("analysis", job)
 
     def task_status(self, task_id: str) -> dict:
-        raise NotImplementedError("task_status: M7")
+        from ghmcp.runtime import tasks
+
+        return tasks.task_status(task_id)
 
     # ------------------------------------------------------------------ internals
 

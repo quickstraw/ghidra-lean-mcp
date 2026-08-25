@@ -38,14 +38,22 @@ def test_fake_implements_protocol():
     assert hasattr(adapter, "env")
 
 
-def test_unimplemented_methods_raise_not_implemented():
-    """Stubs must be loud: a missing milestone should never silently succeed."""
-    import pytest
+def test_no_bare_not_implemented_stubs():
+    """Every backend method must be implemented by the end of the milestone run.
 
-    adapter = FakeAdapter()
-    with pytest.raises(NotImplementedError):
-        adapter.find("p", object())
-    with pytest.raises(NotImplementedError):
-        adapter.refs("p", object())
-    with pytest.raises(NotImplementedError):
-        adapter.rename("p", object())
+    A bare `raise NotImplementedError(...)` in either adapter (real or fake) is a
+    loud reminder that an advertised capability silently no-ops.
+    """
+    import inspect
+
+    for cls in (GhidraBackend, FakeAdapter):
+        for name in adapter_methods(cls):
+            fn = getattr(cls, name)
+            try:
+                src = inspect.getsource(fn)
+            except (OSError, TypeError):  # pragma: no cover - C-impls lack source
+                continue
+            body = src.split(":", 1)[-1]
+            stripped = body.strip()
+            if stripped.startswith("raise NotImplementedError"):
+                raise AssertionError(f"{cls.__name__}.{name} is still an unimplemented stub")
