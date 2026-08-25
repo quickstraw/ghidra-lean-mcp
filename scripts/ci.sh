@@ -4,7 +4,7 @@ set -euo pipefail
 
 uv sync --locked
 uv run ruff check src tests
-uv run import-linter --config pyproject.toml
+uv run import-linter lint --config pyproject.toml
 uv run pytest tests/unit tests/contract
 
 # Docs must be regenerated from the registry (CI fails if stale).
