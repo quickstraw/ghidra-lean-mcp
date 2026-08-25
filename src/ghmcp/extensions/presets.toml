@@ -1,0 +1,71 @@
+# Console presets: merge these into open_program args (explicit args win).
+# Semantics per plan §6.5: loader_name resolves via LoaderService,
+# loader_args are addLoaderArg pairs, image_base is applied post-load,
+# analysis maps to analyzer option overrides, requires gates on extensions.
+
+# fmt: off
+[preset.psp]
+title       = "PSP homebrew / decrypted EBOOT.BIN"
+requires    = ["allegrex"]
+loader_name = "PSP Executable (ELF)"
+loader_args = {}
+language    = "Allegrex:LE:32:default"
+compiler    = "default"
+image_base  = "0x08804000"
+analysis    = { "Non-Returning Functions - Discovered" = false }
+notes       = "Decrypted EBOOT.BIN/PRX. Raw dumps: set language + image_base manually."
+
+[preset.switch]
+title       = "Nintendo Switch NSO"
+requires    = ["switch"]
+loader_name = "Nintendo Switch NSO"
+loader_args = {}
+language    = "AARCH64:LE:64:v8A"
+compiler    = "default"
+image_base  = "0x00000000"
+
+[preset.ps2]
+title       = "PS2 ELF"
+requires    = ["ee-reloaded"]
+loader_name = "PS2 ELF"
+loader_args = {}
+language    = "MIPS:LE:32:R5900"
+compiler    = "default"
+image_base  = "0x00100000"
+
+[preset.ps1]
+title       = "PS1 PSX-EXE"
+requires    = ["psx"]
+loader_name = "PlayStation 1 / PSX-EXE"
+loader_args = {}
+language    = "MIPS:LE:32:R3000"
+compiler    = "default"
+image_base  = "0x80010000"
+
+[preset.gamecube]
+title       = "GameCube DOL"
+requires    = ["gamecube"]
+loader_name = "Nintendo GameCube DOL"
+loader_args = {}
+language    = "PowerPC:BE:32:60x"
+compiler    = "default"
+
+[preset.nds]
+title       = "NDS"
+requires    = ["ntr"]
+loader_name = "NDS"
+loader_args = {}
+language    = "ARM:LE:32:v4T"
+
+[preset.n64]
+title       = "N64"
+requires    = ["n64"]
+loader_name = "N64"
+loader_args = {}
+language    = "MIPS:BE:32:R4300"
+
+[preset.raw]
+title       = "Raw binary dump (manual language/image base)"
+requires    = []
+loader_name = "Binary"
+loader_args = {}

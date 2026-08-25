@@ -1,0 +1,92 @@
+# Catalog data: installed-extension registry. Data-only growth (plan §6.2):
+# adding a console is an appended [extension.<id>] table, never code.
+
+[extension.allegrex]
+title       = "Allegrex (PSP) processor + PSP ELF loader"
+repo        = "kotcrab/ghidra-allegrex"
+module_name = "ghidra-allegrex"
+provides    = { languages = ["Allegrex"], loaders = ["PSP Executable (ELF)"] }
+asset_regex = ".*ghidra-allegrex\\.zip$"
+ghidra_min  = "12.0"
+consoles    = ["psp"]
+validate    = true
+
+[extension.switch]
+title       = "Nintendo Switch NSO/NRO/KIP loader"
+repo        = "Adubbz/Ghidra-Switch-Loader"
+module_name = "Ghidra-Switch-Loader"
+provides    = { loaders = ["Nintendo Switch NSO", "NRO", "KIP"] }
+consoles    = ["switch"]
+validate    = true
+build       = { tool = "gradlew", jdk = 21 }   # no prebuilt asset per Ghidra release
+
+[extension.ee-reloaded]
+title       = "PS2 EE (R5900) processor + IRX loader"
+repo        = "chaoticgd/ghidra-emotionengine-reloaded"
+module_name = "ghidra-emotionengine-reloaded"
+provides    = { languages = ["MIPS:LE:32:R5900"], loaders = ["PS2 ELF", "IRX"] }
+asset_regex = ".*emotionengine-reloaded\\.zip$"
+consoles    = ["ps2"]
+validate    = true
+
+[extension.psx]
+title       = "PS1 PSX-EXE / psyq loader"
+repo        = "lab313ru/ghidra_psx_ldr"
+module_name = "ghidra_psx_ldr"
+provides    = { loaders = ["PlayStation 1 / PSX-EXE"] }
+asset_regex = ".*ghidra_psx_ldr\\.zip$"
+consoles    = ["ps1"]
+validate    = true
+
+[extension.gamecube]
+title       = "GameCube/Wii DOL/REL loader"
+repo        = "Cuyler36/Ghidra-GameCube-Loader"
+module_name = "Ghidra-GameCube-Loader"
+provides    = { loaders = ["Nintendo GameCube DOL"] }
+asset_regex = ".*GameCube.*\\.zip$"
+consoles    = ["gamecube"]
+validate    = true
+
+[extension.n64]
+title       = "N64 loader"
+repo        = "zeroKilo/N64LoaderWV"
+module_name = "N64LoaderWV"
+provides    = { loaders = ["N64"] }
+asset_regex = ".*N64LoaderWV\\.zip$"
+consoles    = ["n64"]
+validate    = true
+
+[extension.ntr]
+title       = "NDS loader"
+repo        = "pedro-javierf/NTRGhidra"
+module_name = "NTRGhidra"
+provides    = { loaders = ["NDS"] }
+asset_regex = "NTRGhidra-build\\.zip$"
+consoles    = ["nds"]
+validate    = true            # low activity upstream — doctor flips this if unsupported
+
+[extension.ctr]
+title       = "3DS loader"
+repo        = "Martmists-GH/ghidra-ctr-loader"
+module_name = "ghidra-ctr-loader"
+provides    = { loaders = ["3DS"] }
+asset_regex = ".*\\.zip$"
+consoles    = ["3ds"]
+validate    = true            # low activity upstream — doctor flips this if unsupported
+
+[extension.ps4]
+title       = "PS4 ELF loader"
+repo        = "astrelsky/GhidraOrbis"
+module_name = "GhidraOrbis"
+provides    = { loaders = ["PS4"] }
+asset_regex = ".*GhidraOrbis\\.zip$"
+consoles    = ["ps4"]
+validate    = true
+
+[extension.xex]
+title       = "Xbox 360 XEX2 loading support"
+repo        = "gibbed/xex2kit"
+module_name = "xex2kit"
+provides    = { loaders = ["Xbox 360"] }
+consoles    = ["xbox360"]
+validate    = true            # low activity upstream — doctor flips this if unsupported
