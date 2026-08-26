@@ -95,3 +95,26 @@ def preset_status(verify_results: list[dict]) -> dict[str, str]:
         missing = [r for r in preset.requires if r not in ok_ids]
         status[preset.name] = f"missing_extension:{','.join(missing)}" if missing else "satisfiable"
     return status
+
+
+def enrich_env(env: object, *, loaders: list[str] | None = None,
+               languages: list[str] | None = None,
+               active_extensions: list[str] | None = None,
+               installed_extensions: list[str] | None = None) -> object:
+    """Fill the shared EnvInfo meta (presets + preset_status) from live lists.
+
+    Single source of truth for both adapters (plan §6.5): `environment`
+    surfaces preset satisfiability, and `ext/verify`/`doctor` derive status
+    from the same `verify_extensions` pass, so the two never disagree.
+    """
+    env.presets = sorted(p.name for p in load_presets().values())
+    env.loaders = list(loaders if loaders else getattr(env, "loaders", []))
+    env.languages = list(languages if languages else getattr(env, "languages", []))
+    env.active_extensions = list(
+        active_extensions if active_extensions else getattr(env, "active_extensions", [])
+    )
+    env.installed_extensions = list(
+        installed_extensions if installed_extensions else getattr(env, "installed_extensions", [])
+    )
+    env.preset_status = preset_status(verify_extensions(env))
+    return env

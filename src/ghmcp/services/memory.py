@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from ghmcp.ghidra.protocols import Insn, InstructionsRequest, Model
+from ghmcp.ghidra.protocols import Insn, InstructionsRequest, Model, TypedValue
 from ghmcp.platform import format as fmt
 from ghmcp.platform.errors import BadTarget
 from ghmcp.platform.targets import parse_address
@@ -43,6 +43,7 @@ class ReadResult(Model):
     length: int
     data: str
     truncated: bool = False
+    typed: list[TypedValue] | None = None  # only when format="typed"
 
 
 def disassemble_run(params: DisassembleParams, ctx: ServiceCtx) -> DisassembleResult:
@@ -90,8 +91,12 @@ def read_run(params: ReadParams, ctx: ServiceCtx) -> ReadResult:
         raise BadTarget(f"not an address: {text!r}", hint="pass 0x88…. or a plain number") from None
 
     if params.format == "typed":
-        raise BadTarget(
-            "typed reads land with M6 (data types)", hint="use format='hex' or 'ascii' for now"
+        values = adapter.read_typed(pid, value, params.length, params.type)
+        return ReadResult(
+            address=fmt.hexaddr(value),
+            length=params.length,
+            data=_render_typed(values),
+            typed=values,
         )
 
     data = adapter.read(pid, value, params.length)
@@ -108,3 +113,11 @@ def _render(data: bytes, fmt_mode: str) -> str:
         words = [int.from_bytes(data[i : i + 4], "little") for i in range(0, len(data) - 3, 4)]
         return " ".join(f"{w:08x}" for w in words)
     return fmt.fmt_bytes(data)
+
+
+def _render_typed(values: list[TypedValue]) -> str:
+    if not values:
+        return "(no defined data in range)"
+    return "\n".join(
+        f"{v.address:#x}  {v.type_name or '?'}  [{v.size}]  {v.value}" for v in values
+    )

@@ -84,3 +84,18 @@ def test_batch_plan_keeps_useful_per_fn_and_caps_targets():
     # Single-target edge.
     per_fn, cap = _batch_plan(1, 2)
     assert per_fn == 60.0 and cap >= 1
+
+
+def test_batch_plan_rounds_whole_waves():
+    """Regression: at 7 waves (28 targets, pool 4) 90.0/7 is a hair below the
+    exact quotient — `int(90.0 // per_fn)` truncated to 6 waves and deferred a
+    full wave that fits the 90s window. The cap must cover all fit waves."""
+    from ghmcp.ghidra.decomp import _batch_plan
+
+    per_fn, cap = _batch_plan(28, 4)
+    assert per_fn == 90.0 / 7
+    assert cap == 28, f"7 waves fit the window, but cap is {cap}"
+    # A non-divisor per_fn round of 11.25 must still floor to 11 waves.
+    per_fn, cap = _batch_plan(64, 2)
+    assert per_fn == 8.0
+    assert cap == 22

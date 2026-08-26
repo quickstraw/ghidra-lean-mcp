@@ -1,0 +1,63 @@
+{
+  "fixture": "J:\\Workspace_Fast\\AI Agent Tooling\\ghidra-headless-mcp\\repo\\tests\\fixtures\\bin\\tiny_x86.coff",
+  "rows": [
+    {
+      "name": "env_probe",
+      "target_ms": 500.0,
+      "measured_ms": 0.9916999842971563,
+      "skipped": false,
+      "reason": ""
+    },
+    {
+      "name": "warm_decompile",
+      "target_ms": 400.0,
+      "measured_ms": 263.73619999503717,
+      "skipped": false,
+      "reason": "",
+      "function": "start",
+      "lines": 4
+    },
+    {
+      "name": "decompile_batch_8",
+      "target_ms": 1500.0,
+      "measured_ms": null,
+      "skipped": true,
+      "reason": "fixture has only 2 function(s)"
+    },
+    {
+      "name": "find_symbols_page_100",
+      "target_ms": 80.0,
+      "measured_ms": 1.437900005839765,
+      "skipped": false,
+      "reason": ""
+    },
+    {
+      "name": "xrefs_sweep_1000",
+      "target_ms": 1000.0,
+      "measured_ms": null,
+      "skipped": true,
+      "reason": "fixture has only 2 function target(s)"
+    },
+    {
+      "name": "masked_search_8mb",
+      "target_ms": 700.0,
+      "measured_ms": null,
+      "skipped": true,
+      "reason": "largest initialized block is 0 MB (need 8)"
+    },
+    {
+      "name": "disassemble_page_100",
+      "target_ms": 500.0,
+      "measured_ms": 10.79500000923872,
+      "skipped": false,
+      "reason": ""
+    },
+    {
+      "name": "reopen_cached",
+      "target_ms": 3000.0,
+      "measured_ms": 656.6003000189085,
+      "skipped": false,
+      "reason": ""
+    }
+  ]
+}

@@ -8,6 +8,7 @@ Unimplemented milestones stay loud (NotImplementedError, never a silent no-op).
 from __future__ import annotations
 
 import contextlib
+import time
 from pathlib import Path
 
 from ghmcp.ghidra.protocols import (
@@ -33,6 +34,12 @@ from ghmcp.platform.telemetry import log_event
 class GhidraBackend:
     """Implements GhidraAdapter over runtime.jvm.JvmManager."""
 
+    # Extension dir/registry state changes only on install/uninstall; TTL keeps
+    # the drift warning fresh (plan §6.6) without a JVM probe + FS scan on
+    # every env() (that would blow the §5.1 per-call overhead budget).
+    _EXT_META_TTL = 30.0
+    _REGISTRY_TTL = 30.0
+
     def __init__(self, jvm: object, settings: object = None):
         self._jvm = jvm
         self._settings = settings
@@ -41,6 +48,8 @@ class GhidraBackend:
         self._decompool = None
         self._pid = 0
         self._closed = False
+        self._meta_cache: tuple[float, list[str], str | None] | None = None
+        self._registry_cache: tuple[float, list[str], list[str], list[str]] | None = None
 
     # ------------------------------------------------------------------ plumbing
 
@@ -79,15 +88,109 @@ class GhidraBackend:
 
     def env(self) -> EnvInfo:
         info = self._jvm.info()
-        loaders, languages, active = self._probe_registry()
-        return EnvInfo(
+        loaders, languages, active = self._cached_registry()
+        env = EnvInfo(
             ghidra_version=info.get("version"),
             full_version=info.get("version"),
             java_heap=getattr(self._jvm.settings, "jvm_heap", ""),
             extension_dirs=[info["extension_dir"]] if info.get("extension_dir") else [],
+            active_extensions=active,
             loaders=loaders,
             languages=languages,
-            active_extensions=active,
+        )
+        self._fill_env_meta(env, active)
+        return env
+
+    def _cached_registry(self) -> tuple[list[str], list[str], list[str]]:
+        """Loader/language/active probe — static for the JVM lifetime, but
+        TTL-cached so hot env() calls (every open_program, health, session env)
+        stay in the §5.1 per-call budget instead of paying a JVM probe
+        round-trip each time."""
+        now = time.monotonic()
+        if self._registry_cache is not None and now - self._registry_cache[0] < self._REGISTRY_TTL:
+            return self._registry_cache[1], self._registry_cache[2], self._registry_cache[3]
+        loaders, languages, active = self._probe_registry()
+        self._registry_cache = (now, loaders, languages, active)
+        return loaders, languages, active
+
+    def _fill_env_meta(self, env: EnvInfo, active: list[str]) -> None:
+        """Preset satisfiability + installed list + drift warning (plan §6.5/§6.6).
+
+        The installed probe and the extension-dir filesystem scan are cached
+        for `_EXT_META_TTL` seconds — the state only changes when the user
+        installs/uninstalls an extension, and a drift report must land at the
+        next env call after that (restart required). Shared `enrich_env` keeps
+        the fake and real adapters from disagreeing about preset status.
+        """
+        from ghmcp.extensions.verify import enrich_env
+
+        installed, drift = self._cached_meta(active)
+        env.installed_extensions = installed
+        enrich_env(
+            env,
+            loaders=list(env.loaders),
+            languages=list(env.languages),
+            active_extensions=list(active),
+            installed_extensions=list(installed),
+        )
+        env.drift_warning = drift
+
+    def _cached_meta(self, active: list[str]) -> tuple[list[str], str | None]:
+        now = time.monotonic()
+        if self._meta_cache is not None and now - self._meta_cache[0] < self._EXT_META_TTL:
+            return self._meta_cache[1], self._meta_cache[2]
+        installed = self._probe_installed()
+        drift = self._extension_drift(active)
+        self._meta_cache = (now, installed, drift)
+        return installed, drift
+
+    def _probe_installed(self) -> list[str]:
+        installed: list[str] = []
+        try:
+            from jpype import JClass
+
+            eu = JClass("ghidra.util.extensions.ExtensionUtils")
+            for details in eu.getInstalledExtensions() or []:
+                try:
+                    installed.append(
+                        str(details.getName()) if hasattr(details, "getName") else str(details)
+                    )
+                except Exception:
+                    installed.append(str(details))
+        except Exception:
+            pass
+        return sorted(set(installed))
+
+    def _extension_drift(self, active: list[str]) -> str | None:
+        """Names on disk in the user extension dir that are not active in this
+        JVM (a `ghmcp ext install` under a running server — restart required)."""
+        info = self._jvm.info()
+        ext_dir = info.get("extension_dir")
+        if not ext_dir:
+            return None
+        active_lower = {a.lower() for a in active}
+        on_disk: list[str] = []
+        try:
+            for child in Path(ext_dir).iterdir():
+                if not child.is_dir():
+                    continue
+                names = sorted(
+                    p.name for p in child.iterdir() if p.name.startswith("extension.properties")
+                )
+                if names:
+                    on_disk.append(child.name)
+        except OSError:
+            return None
+        stale = [
+            name
+            for name in on_disk
+            if name.lower() not in active_lower and _dir_not_disabled(Path(ext_dir) / name)
+        ]
+        if not stale:
+            return None
+        return (
+            f"extension dir has {', '.join(sorted(stale))} not active in this JVM — "
+            "install/uninstall requires a server restart"
         )
 
     def _probe_registry(self) -> tuple[list[str], list[str], list[str]]:
@@ -167,12 +270,13 @@ class GhidraBackend:
             with txn(program, "ghmcp: setImageBase"):
                 program.setImageBase(self._addr(program, spec.image_base), True)
 
-        if spec.analyze != "none":
-            self._maybe_analyze(program, mode=spec.analyze)
-
         self._pid += 1
         pid = f"p{self._pid}"
-        info = self._snapshot(program, pid, spec=spec)
+        if spec.analyze != "none":
+            task_id = self._maybe_analyze(program, mode=spec.analyze, target=pid)
+        else:
+            task_id = None
+        info = self._snapshot(program, pid, spec=spec, analysis_task_id=task_id)
         from ghmcp.runtime.session import SessionEntry
 
         entry = SessionEntry(
@@ -191,14 +295,17 @@ class GhidraBackend:
         )
         return info
 
-    def _maybe_analyze(self, program: object, mode: str) -> None:
+    def _maybe_analyze(self, program: object, mode: str, target: str | None = None) -> str | None:
+        """Start background analysis; returns the task id when one was started
+        (plan §5.1: open_program(analyze="full") is the async surface the agent
+        polls via analysis(action="status"))."""
         from ghmcp.runtime import tasks
 
         if mode == "none":
-            return
+            return None
         if self._is_analyzed(program) and self._has_instructions(program):
-            return
-        tasks.start_task("analysis", lambda: _run_analysis(program))
+            return None
+        return tasks.start_task("analysis", lambda: _run_analysis(program), target=target)
 
     @staticmethod
     def _has_instructions(program: object) -> bool:
@@ -209,6 +316,9 @@ class GhidraBackend:
 
     def close(self, pid: str) -> None:
         self._bootstrap()
+        from ghmcp.runtime import tasks
+
+        tasks.wait_for_target(pid, timeout=10.0)
         self._sessions.close(pid)
 
     def shutdown(self) -> None:
@@ -216,10 +326,15 @@ class GhidraBackend:
 
         Terminal: after this, `_bootstrap` raises instead of re-creating native
         state while teardown runs (a re-bootstrapped ProjectManager would
-        self-lock on the still-open .ghmcp.lock fd)."""
+        self-lock on the still-open .ghmcp.lock fd). Analysis tasks are
+        drained FIRST so no pyghidra thread touches a program that is being
+        disposed (ClosedException / native access violations otherwise)."""
         if self._closed:
             return
         self._closed = True
+        from ghmcp.runtime import tasks
+
+        tasks.drain(timeout=30.0)
         if self._decompool is not None:
             self._decompool.close()
         if self._project_mgr is not None:
@@ -240,8 +355,23 @@ class GhidraBackend:
         infos = []
         for pid in self._sessions.open_pids():
             entry = self._sessions.get(pid)
-            infos.append(self._snapshot(entry.program, pid, spec=None))
+            infos.append(
+                self._snapshot(
+                    entry.program,
+                    pid,
+                    spec=None,
+                    writable=bool(entry.open_flags.get("writable")),
+                )
+            )
         return infos
+
+    def is_writable(self, pid: str) -> bool:
+        """True when the session was opened writable; the snapshot's `writable`
+        is not a reliable carry (list_open rebuilds it), so write gating must
+        read the entry's open flags directly."""
+        self._bootstrap()
+        entry = self._sessions.get(pid)
+        return bool(entry.open_flags.get("writable"))
 
     def modification_number(self, pid: str) -> int:
         entry = self._sessions.get(pid)
@@ -288,6 +418,15 @@ class GhidraBackend:
             return bytes(out)
         except Exception:
             return bytes(bytearray(out))
+
+    def read_typed(
+        self, pid: str, address: int, length: int, type_name: str | None = None
+    ) -> list[object]:
+        self._bootstrap()
+        from ghmcp.ghidra.listing import typed_values
+
+        entry = self._sessions.get(pid)
+        return typed_values(entry.program, address, length, type_name)
 
     # ------------------------------------------------------------------ xrefs/symbols (M4)
 
@@ -470,7 +609,7 @@ class GhidraBackend:
 
             run_analysis(entry, options)
 
-        return tasks.start_task("analysis", job)
+        return tasks.start_task("analysis", job, target=pid)
 
     def task_status(self, task_id: str) -> dict:
         from ghmcp.runtime import tasks
@@ -500,7 +639,14 @@ class GhidraBackend:
         except Exception:
             return True  # state unknown: don't re-analyze on every open
 
-    def _snapshot(self, program: object, pid: str, spec: OpenSpec | None = None) -> ProgramInfo:
+    def _snapshot(
+        self,
+        program: object,
+        pid: str,
+        spec: OpenSpec | None = None,
+        writable: bool | None = None,
+        analysis_task_id: str | None = None,
+    ) -> ProgramInfo:
         fmt = "unknown"
         lang = ""
         compiler = ""
@@ -541,7 +687,8 @@ class GhidraBackend:
             image_base=int(program.getImageBase().getOffset()),
             entry_points=sorted(set(entry_points))[:16],
             memory_blocks=blocks,
-            writable=bool(spec and spec.writable),
+            analysis_task_id=analysis_task_id,
+            writable=bool(writable if writable is not None else spec and spec.writable),
             **counts,
         )
 
@@ -588,3 +735,8 @@ def _run_analysis(program: object) -> None:
 
     pyghidra.analyze(program, None)
     log_event("analysis_done", format=str(getattr(program, "getExecutableFormat", lambda: "?")()))
+
+
+def _dir_not_disabled(path: Path) -> bool:
+    """True when an extension dir is enabled (no .uninstalled disable marker)."""
+    return not (path / "extension.properties.uninstalled").exists()

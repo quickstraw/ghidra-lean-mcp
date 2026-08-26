@@ -27,6 +27,7 @@ from ghmcp.ghidra.protocols import (
     StringQuery,
     Symbol,
     SymbolQuery,
+    TypedValue,
 )
 from ghmcp.platform.errors import GhmcpError, ReadOnly
 
@@ -98,11 +99,20 @@ class FakeAdapter:
     # ------------------------------------------------------------------ env
 
     def env(self) -> EnvInfo:
-        return EnvInfo(
+        env = EnvInfo(
             ghidra_version="fake-9.9",
             full_version="fake-9.9",
             java_heap=getattr(self._settings, "jvm_heap", "8g") if self._settings else "8g",
+            installed_extensions=[],
+            active_extensions=[],
+            loaders=[],
+            languages=[],
         )
+        from ghmcp.extensions.verify import enrich_env
+
+        enrich_env(env)
+        env.drift_warning = None
+        return env
 
     # ------------------------------------------------------------ lifecycle
 
@@ -110,6 +120,7 @@ class FakeAdapter:
         self._next_pid += 1
         pid = f"f{self._next_pid}"
         base = spec.image_base or 0x100000
+        analysis_task_id = None
         info = ProgramInfo(
             pid=pid,
             alias=spec.alias,
@@ -124,6 +135,7 @@ class FakeAdapter:
             function_count=8,
             string_count=5,
             analysis_state="analyzed" if spec.analyze != "none" else "none",
+            analysis_task_id=analysis_task_id,
             writable=spec.writable,
         )
         self._programs[pid] = {
@@ -141,6 +153,8 @@ class FakeAdapter:
             "refs": _seed_refs(),
             "strings": _seed_strings(),
         }
+        if spec.analyze in ("auto", "full"):
+            info.analysis_task_id = self.analyze_async(pid, None)
         if self._current is None:
             self._current = pid
         return info
@@ -161,6 +175,10 @@ class FakeAdapter:
 
     def list_open(self) -> list[ProgramInfo]:
         return [self._programs[p]["info"] for p in self._programs]
+
+    def is_writable(self, pid: str) -> bool:
+        spec = self._require(pid).get("spec")
+        return bool(getattr(spec, "writable", False))
 
     def modification_number(self, pid: str) -> int:
         return self._require(pid)["mod"]
@@ -221,6 +239,31 @@ class FakeAdapter:
         start = address % len(data)
         return b"".join(data[start : start + length] for _ in range(1))
 
+    def read_typed(
+        self, pid: str, address: int, length: int, type_name: str | None = None
+    ) -> list[object]:
+        """Mirror ghidra.listing.typed_values: defined data items in the window.
+
+        The fake treats data-kind symbols as its defined-data corpus; an item
+        whose size lands outside the window is skipped (same as the real one).
+        """
+        entry = self._require(pid)
+        out: list[TypedValue] = []
+        for name, sym in sorted(entry["symbols"].items(), key=lambda kv: kv[1]["addr"]):
+            if sym["kind"] not in ("data", "label"):
+                continue
+            addr, size = sym["addr"], sym.get("size") or 0
+            if not (address <= addr < address + length):
+                continue
+            if type_name and name != type_name:
+                continue
+            value = "0x00"
+            if size:
+                raw = entry["bytes"][addr % len(entry["bytes"]) :][: min(size, 8)]
+                value = " ".join(f"{b:02x}" for b in raw)
+            out.append(TypedValue(address=addr, type_name=name, value=value, size=size))
+        return out
+
     def find(self, pid: str, request: SearchQuery) -> list[object]:
         entry = self._require(pid)
         data = entry["bytes"]
@@ -269,10 +312,24 @@ class FakeAdapter:
     def run_script(
         self, pid: str | None, kind: str, code: str | None, path: str | None, args: list[str]
     ) -> dict:
-        self._require(pid)
-        if kind != "python":
-            raise NotImplementedError("ghidra_script: M5 (fake)")
-        ns: dict = {"args": list(args), "result": None}
+        entry = self._require(pid)
+        if kind == "ghidra_script":
+            if not path:
+                from ghmcp.platform.errors import TaskFailed
+
+                raise TaskFailed("ghidra_script needs path=", hint="point path= at a .py script")
+            import pathlib
+
+            code = pathlib.Path(path).read_text(encoding="utf-8")
+        # The real backend surfaces a structured result only for inline python;
+        # ghidra_script output is stdout-only (result stays None) — the fake
+        # mirrors that instead of over-claiming (parity).
+        ns: dict = {
+            "args": list(args),
+            "result": None,
+            "program": entry,  # the fake's in-memory stand-in for the live Program
+            "currentProgram": entry,
+        }
         import io
         from contextlib import redirect_stderr, redirect_stdout
 
@@ -284,7 +341,8 @@ class FakeAdapter:
         except BaseException as exc:
             error = f"{type(exc).__name__}: {exc}"
             buf.write(f"\n{error}")
-        return {"stdout": buf.getvalue(), "result": ns.get("result"), "error": error}
+        result = ns.get("result") if kind == "python" else None
+        return {"stdout": buf.getvalue(), "result": result, "error": error}
 
     def refs(self, pid: str, request: RefsRequest) -> tuple[list[object], bool]:
         entry = self._require(pid)

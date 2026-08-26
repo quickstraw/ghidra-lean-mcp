@@ -5,6 +5,7 @@ Run with: `$env:GHIDRA_INSTALL_DIR="<ghidra dir>"; uv run python -m pytest tests
 
 from __future__ import annotations
 
+import contextlib
 import time
 from pathlib import Path
 
@@ -12,8 +13,6 @@ import pytest
 
 from ghmcp.ghidra.backend import GhidraBackend
 from ghmcp.ghidra.protocols import DecompileRequest, InstructionsRequest, OpenSpec
-from ghmcp.platform.config import Settings
-from ghmcp.runtime.jvm import JvmManager
 
 pytestmark = pytest.mark.live
 
@@ -21,19 +20,23 @@ FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "bin" / "tiny_x86.c
 
 
 @pytest.fixture(scope="module")
-def krate():
-    settings = Settings()
-    jvm = JvmManager(settings)
-    jvm.start()
-    yield settings, jvm, GhidraBackend(jvm, settings)
-    jvm.shutdown()
+def krate(jvm):
+    settings = jvm.settings
+    backend = GhidraBackend(jvm, settings)
+    yield settings, jvm, backend
+    # Drain analysis tasks + close projects BEFORE the session JVM stops:
+    # disposing programs under a live analysis thread caused ClosedException
+    # noise and native access violations at jpype.shutdownJVM.
+    with contextlib.suppress(Exception):
+        backend.shutdown()
 
 
 def _wait_analyzed(backend: GhidraBackend, pid: str, wait: float = 180.0) -> None:
     deadline = time.time() + wait
+    probe = InstructionsRequest(target="function", start="start", count=1)
     while time.time() < deadline:
         listing = {p.pid: p for p in backend.list_open()}
-        if listing[pid].function_count > 0:
+        if listing[pid].function_count > 0 and backend.instructions(pid, probe):
             return
         time.sleep(1.0)
 

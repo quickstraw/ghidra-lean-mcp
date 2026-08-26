@@ -1,23 +1,15 @@
 # ghidra-headless-mcp
 
-A lean, headless [Ghidra](https://ghidra-sre.org/) MCP server for reverse
-engineering video games. It exposes a small, purpose-built tool catalog (19
-tools + a `health` diagnostic) that covers static comprehension, anchoring,
-memory inspection, durable annotation, a scripting escape hatch, multi-binary
-sessions, and console loader/processor extensions as a first-class subsystem.
-
-The design goal is the opposite of the 200+-tool Ghidra MCP servers: **few,
-high-value, composable tools** that add up to a few thousand tokens of tool
-description, backed by an adapter protocol implemented twice (real Ghidra and
-an in-memory fake for CI).
+A lean, headless Ghidra MCP server for reverse engineering video games.
+It exposes a small, purpose-built tool catalog (19 tools + a `health` diagnostic)
+that covers tools that are used extensively for modding or reverse engineering games.
 
 ## Why
 
-Three independent RE sessions (PSP EBOOT/font, UE `.dll` serialization, Switch
-NSO + PC localization) all converged on the same core: decompile, disassemble,
-xrefs, symbol/string discovery, memory reads, multi-program plumbing and a
-script escape hatch. Everything else (debugger, Ghidra Server, malware/IOC
-detectors, BSim, GUI cursor tools, project management) is out of scope.
+After using Ghidra in several projects, I noticed that only a few tools
+were being used consistently. The other servers I used were too general
+and gave access to too many tools. Having >200 tools that were never used was
+bloating the context for no reason, so these tools were culled.
 
 ## Install
 

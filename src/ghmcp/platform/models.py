@@ -35,6 +35,7 @@ class ProgramInfo(Model):
     function_count: int = 0
     string_count: int = 0
     analysis_state: str = "unknown"
+    analysis_task_id: str | None = None  # set when this open started background analysis
     writable: bool = False
 
 
@@ -98,6 +99,13 @@ class Hit(Model):
     offset: int | None = None  # for file-scope scans
     kind: str = "bytes"
     preview: str = ""
+
+
+class TypedValue(Model):
+    address: int
+    type_name: str = ""
+    value: str = ""
+    size: int = 0
 
 
 # --------------------------------------------------------------------------

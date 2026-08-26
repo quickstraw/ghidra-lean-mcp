@@ -25,7 +25,7 @@ def memory_map(entry: object) -> list[dict]:
                 "execute": bool(b.isExecute()),
                 "initialized": bool(b.isInitialized()),
                 "volatile": bool(b.isVolatile()),
-                "space": str(b.getAddressSpace()),
+                "space": str(b.getStart().getAddressSpace()),
             }
         )
     return blocks

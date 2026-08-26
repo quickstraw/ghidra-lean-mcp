@@ -168,7 +168,11 @@ def _batch_plan(todo_len: int, wave: int) -> tuple[float, int]:
     fit the batch inside the ~90 s schedule window of the 120 s tool budget."""
     waves = max(1, -(-todo_len // wave))
     per_fn = max(8.0, min(60.0, 90.0 / waves))
-    max_targets = max(wave, wave * int(90.0 // per_fn))
+    # 90.0/per_fn is mathematically `waves` but floating-point division can
+    # land a hair below (e.g. 90/7): int(90.0 // per_fn) would then truncate
+    # one whole wave off the cap and defer targets that fit. round() fixes
+    # that (11.25 still rounds to 11; the 8s floor still caps at 11 waves).
+    max_targets = max(wave, wave * max(1, round(90.0 / per_fn)))
     return per_fn, max_targets
 
 

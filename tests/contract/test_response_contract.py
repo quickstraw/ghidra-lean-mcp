@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import sys
+from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -20,11 +23,22 @@ from mcp.types import CallToolResult, TextContent
 from ghmcp.services.models import HealthResult
 
 
+def _ghmcp_command() -> list[str]:
+    """Invoke ghmcp without relying on it being on PATH: the venv's own
+    console script when present, else `python -m ghmcp` (defines main()).
+    """
+    exe = Path(sys.executable).with_name("ghmcp" + (".exe" if os.name == "nt" else ""))
+    if exe.exists():
+        return [str(exe)]
+    return [sys.executable, "-m", "ghmcp"]
+
+
 def test_stdio_roundtrip_contract():
     got: dict = {}
 
     async def main():
-        server = StdioServerParameters(command="ghmcp", args=["serve", "--fake"])
+        cmd = _ghmcp_command()
+        server = StdioServerParameters(command=cmd[0], args=[*cmd[1:], "serve", "--fake"])
         async with (
             stdio_client(server) as (read, write),
             ClientSession(read, write) as session,

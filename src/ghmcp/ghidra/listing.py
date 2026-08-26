@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ghmcp.ghidra.protocols import Insn, InstructionsRequest
+from ghmcp.ghidra.protocols import Insn, InstructionsRequest, TypedValue
 from ghmcp.platform.errors import BadTarget, NotFound
 from ghmcp.platform.targets import parse_address
 
@@ -134,6 +134,56 @@ def lookup_symbol(program: object, name_or_addr: str) -> object:
         f"no symbol at or named {name_or_addr!r}",
         hint="check the exact name with find_symbols, or pass a plain address",
     )
+
+
+def typed_values(
+    program: object, start: int, length: int, type_name: str | None = None
+) -> list[TypedValue]:
+    """Defined data items in [start, start+length) with type name + rendered value.
+
+    Raises BadTarget only when length is not positive. When `type_name` is
+    given, only items whose top-level data type matches are returned (so a
+    struct field at a packed address is skipped, not misrendered).
+    """
+    if length <= 0:
+        raise BadTarget("typed read needs a positive length", hint="pass length=N bytes")
+    listing = program.getListing()
+    start_addr = _address(program, hex(start))
+    end_addr = _address(program, hex(start + length - 1))
+    out: list[TypedValue] = []
+    try:
+        iterator = listing.getDefinedData(start_addr, end_addr, True)
+    except BaseException:
+        return out
+    for data in _make_iterator(iterator):
+        try:
+            name = str(data.getDataType().getName())
+        except BaseException:
+            name = ""
+        if type_name and name != type_name:
+            continue
+        out.append(
+            TypedValue(
+                address=int(data.getAddress().getOffset()),
+                type_name=name,
+                value=_data_value_text(data),
+                size=int(data.getLength()),
+            )
+        )
+    return out
+
+
+def _data_value_text(data: object) -> str:
+    try:
+        v = data.getValue()
+        if v is not None:
+            return str(v)
+    except BaseException:
+        pass
+    try:
+        return str(data.getDefaultValueRepresentation())
+    except BaseException:
+        return ""
 
 
 def _address(program: object, text: str) -> object:

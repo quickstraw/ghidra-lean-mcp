@@ -88,13 +88,22 @@ def test_catalog_is_lean_per_tool():
 
 
 def test_layering_import_linter():
-    root = str(__import__("pathlib").Path(__file__).resolve().parents[2])
-    result = subprocess.run(
-        ["import-linter", "lint", "--config", "pyproject.toml"],
-        capture_output=True,
-        text=True,
-        cwd=root,
-    )
+    import os
+    import sys
+    from pathlib import Path
+
+    root = str(Path(__file__).resolve().parents[2])
+    exe = Path(sys.executable).with_name("import-linter" + (".exe" if os.name == "nt" else ""))
+    if exe.exists():
+        cmd = [str(exe), "lint", "--config", "pyproject.toml"]
+    else:
+        # Not installed as a script (non-activated venv): drive click directly.
+        driver = (
+            "import sys; from importlinter.cli import import_linter; "
+            "sys.argv = ['import-linter', *sys.argv[1:]]; import_linter()"
+        )
+        cmd = [sys.executable, "-c", driver, "lint", "--config", "pyproject.toml"]
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=root)
     assert result.returncode == 0, f"import-linter failed:\n{result.stdout}\n{result.stderr}"
 
 

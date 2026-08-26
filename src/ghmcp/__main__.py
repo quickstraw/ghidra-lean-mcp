@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Annotated
 
@@ -317,9 +318,73 @@ def doctor() -> None:
 
 
 @app.command()
-def bench() -> None:
-    """Run the §5.5 performance scenarios (M3+)."""
-    typer.echo("bench: not implemented yet (ships with M3)")
+def bench(
+    fake: Annotated[bool, typer.Option(help="Run the scenarios against the fake backend.")] = False,
+    binary: Annotated[
+        Path | None, typer.Option(help="Fixture binary for the real scenarios")
+    ] = None,
+    out: Annotated[
+        Path | None, typer.Option(help="Write the results JSON here")
+    ] = None,
+) -> None:
+    """Run the §5.5 performance scenarios; results go to bench/results/."""
+    settings = get_settings(fake=fake)
+    from ghmcp.benchmark import run_fake, run_real
+
+    if fake:
+        from ghmcp.fake.adapter import FakeAdapter
+
+        rows = run_fake(FakeAdapter(settings))
+    else:
+        fixture = binary or (
+            Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "bin" / "tiny_x86.coff"
+        )
+        if not Path(fixture).exists():
+            typer.echo(f"bench needs a binary fixture (pass --binary), none at {fixture}", err=True)
+            raise typer.Exit(2)
+        from ghmcp.ghidra.backend import GhidraBackend
+        from ghmcp.runtime.jvm import JvmManager
+
+        jvm = JvmManager(settings)
+        backend = None
+        try:
+            jvm.start()
+            backend = GhidraBackend(jvm, settings)
+            rows = run_real(backend, settings, Path(fixture))
+        finally:
+            from contextlib import suppress
+
+            if backend is not None:
+                with suppress(Exception):
+                    backend.shutdown()
+            if jvm.started:
+                jvm.shutdown()
+
+    for row in rows:
+        state = "SKIP" if row.skipped else "ok  "
+        measured = f"{row.measured_ms:8.1f}ms" if row.measured_ms is not None else "  (skip)"
+        flag = ""
+        if row.measured_ms is not None and row.measured_ms > row.target_ms:
+            flag = "  OVER TARGET"
+        detail = f"  ({row.reason})" if row.skipped else ""
+        typer.echo(f" {state}  {row.name:<20} target {row.target_ms:7.1f}ms  {measured}{flag}{detail}")
+
+    # Default destination is cwd-relative (a wheel install has no repo layout)
+    # and the name is stable (bench-latest.json) so repeated runs show up as a
+    # diff instead of accumulating timestamped files in the repo.
+    dest = out or (Path.cwd() / "bench" / "results" / "bench-latest.json")
+    payload = {
+        "fake": fake,
+        "rows": [r.as_dict() for r in rows],
+    }
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except OSError as exc:
+        typer.echo(f"could not write bench results to {dest}: {exc}", err=True)
+        typer.echo("pass --out <path> to write the results somewhere writable", err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(f"wrote {dest}")
 
 
 def main() -> None:

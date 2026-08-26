@@ -17,10 +17,10 @@ from ghmcp.platform.errors import TaskFailed
 def run_script(entry: object, kind: str, code: str | None, path: str | None, args: list[str]) -> dict:
     if kind == "ghidra_script":
         return _ghidra_script(entry, path, args)
-    return _inline(entry, code)
+    return _inline(entry, code, args)
 
 
-def _inline(entry: object, code: str | None) -> dict:
+def _inline(entry: object, code: str | None, args: list[str]) -> dict:
     if not code:
         raise TaskFailed(
             "run_script needs code=", hint="pass the python source, or kind='ghidra_script' path=…"
@@ -35,7 +35,7 @@ def _inline(entry: object, code: str | None) -> dict:
         "memory": program.getMemory(),
         "symbols": program.getSymbolTable(),
         "currentAddress": program.getMemory().getMinAddress(),
-        "args": [],
+        "args": list(args),
         "result": None,
     }
     buf = io.StringIO()

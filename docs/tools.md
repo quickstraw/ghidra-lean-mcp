@@ -324,6 +324,18 @@ Open (or reuse) a binary in Ghidra; ops apply to the current program.
           "title": "Analysis State",
           "type": "string"
         },
+        "analysis_task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Analysis Task Id"
+        },
         "writable": {
           "default": false,
           "title": "Writable",
@@ -629,6 +641,18 @@ Manage open programs (list/info/select/close/save/env).
           "default": "unknown",
           "title": "Analysis State",
           "type": "string"
+        },
+        "analysis_task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Analysis Task Id"
         },
         "writable": {
           "default": false,
@@ -1070,6 +1094,37 @@ Read raw memory at an address as hex, ascii or words.
 
 ```json
 {
+  "$defs": {
+    "TypedValue": {
+      "additionalProperties": false,
+      "properties": {
+        "address": {
+          "title": "Address",
+          "type": "integer"
+        },
+        "type_name": {
+          "default": "",
+          "title": "Type Name",
+          "type": "string"
+        },
+        "value": {
+          "default": "",
+          "title": "Value",
+          "type": "string"
+        },
+        "size": {
+          "default": 0,
+          "title": "Size",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "address"
+      ],
+      "title": "TypedValue",
+      "type": "object"
+    }
+  },
   "additionalProperties": false,
   "properties": {
     "address": {
@@ -1088,6 +1143,21 @@ Read raw memory at an address as hex, ascii or words.
       "default": false,
       "title": "Truncated",
       "type": "boolean"
+    },
+    "typed": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/TypedValue"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Typed"
     }
   },
   "required": [

@@ -7,4 +7,3 @@ dist/
 build/
 *.egg-info/
 .ghmcp.toml
-bench/results/

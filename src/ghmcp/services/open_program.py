@@ -9,8 +9,7 @@ from __future__ import annotations
 
 from pydantic import Field
 
-from ghmcp.extensions.catalog import get_preset, load_extensions, load_presets
-from ghmcp.extensions.verify import extension_active, extension_available
+from ghmcp.extensions.catalog import get_preset, load_extensions
 from ghmcp.ghidra.protocols import Model, OpenSpec, ProgramInfo
 from ghmcp.platform.errors import PresetUnsatisfiable
 from ghmcp.services import ServiceCtx
@@ -40,31 +39,11 @@ def run(params: OpenProgramParams, ctx: ServiceCtx) -> OpenProgramResult:
     spec = _merge(preset_name=params.preset, params=params)
     info = adapter.open(spec)
     try:
-        status = _preset_status_map(adapter)
+        env = adapter.env()
+        status = dict(env.preset_status)  # filled by the adapter (plan §6.5)
     except Exception:
         status = {}
     return OpenProgramResult(program=info, preset=params.preset, preset_status=status)
-
-
-def _preset_status_map(adapter: object) -> dict[str, str]:
-    """Preset satisfiability from the live env probe (backend.env probe)."""
-    env = adapter.env()
-    out: dict[str, str] = {}
-    for preset in load_presets().values():
-        ok = True
-        for req in preset.requires:
-            ext = load_extensions().get(req)
-            if ext is None:
-                ok = False
-                break
-            if not extension_active(list(env.active_extensions), ext):
-                ok = False
-                break
-            if not extension_available(list(env.loaders), list(env.languages), ext):
-                ok = False
-                break
-        out[preset.name] = "satisfiable" if ok else "missing_extension"
-    return out
 
 
 def _merge(preset_name: str | None, params: OpenProgramParams) -> OpenSpec:
