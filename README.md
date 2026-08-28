@@ -1,4 +1,4 @@
-# ghidra-headless-mcp
+# ghidra-lean-mcp
 
 A lean, headless Ghidra MCP server for reverse engineering video games.
 It exposes a small, purpose-built tool catalog (19 tools + a `health` diagnostic)

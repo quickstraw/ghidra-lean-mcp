@@ -271,7 +271,7 @@ def ext_build(
 def doctor() -> None:
     """Environment report: Ghidra version, extension dirs, loaders/languages, preset status."""
     settings = get_settings()
-    typer.echo(f"ghidra-headless-mcp {__version__}")
+    typer.echo(f"ghidra-lean-mcp {__version__}")
     typer.echo(
         f"  ghidra_install_dir: {settings.ghidra_install_dir or '(from GHIDRA_INSTALL_DIR)'}"
     )

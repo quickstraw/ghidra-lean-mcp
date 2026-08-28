@@ -21,7 +21,7 @@ SPEC = ToolSpec(
     result=HealthResult,
     service=health.run,
     summarize=lambda r: (
-        f"ghidra-headless-mcp {r.version} — "
+        f"ghidra-lean-mcp {r.version} — "
         + (
             f"JVM up ({r.ghidra_version}, heap {r.jvm_heap})"
             if r.jvm_started

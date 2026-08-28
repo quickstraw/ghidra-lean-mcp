@@ -1,5 +1,5 @@
 [project]
-name = "ghidra-headless-mcp"
+name = "ghidra-lean-mcp"
 version = "0.1.0"
 description = "Lean headless Ghidra MCP server for reverse engineering video games."
 readme = "README.md"

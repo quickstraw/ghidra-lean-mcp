@@ -55,8 +55,8 @@ def build_server(settings: Settings | None = None, *, runtime: Runtime | None = 
             await runtime.close()
 
     server = MCPServer(
-        name="ghidra-headless-mcp",
-        title="ghidra-headless-mcp",
+        name="ghidra-lean-mcp",
+        title="ghidra-lean-mcp",
         description="Headless Ghidra MCP server for reverse engineering video games.",
         version=__version__,
         lifespan=lifespan,
