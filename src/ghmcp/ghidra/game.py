@@ -32,16 +32,27 @@ def memory_map(entry: object) -> list[dict]:
 
 
 def create_block(entry: object, name: str, address: int, size: int, flags: str) -> None:
+    """Create a memory block.
+
+    Ghidra 12.1's API only exposes the template overload
+    `createBlock(MemoryBlock prototype, name, addr, size)` (verified live on
+    12.1.2); the old `(name, addr, size)` / `(BlockType, ...)` overloads are
+    tried as fallbacks for pre-12 installs. `flags` are best-effort: the
+    template form clones the prototype block's permissions, so the closest
+    permission-matching initialized block is picked as the prototype."""
     program = entry.program
     memory = program.getMemory()
     addr = _addr(program, address)
     perms = flags or "rw"
+    want = ("r" in perms, "w" in perms, "x" in perms)
     try:
-        memory.createBlock(name, addr, size)
-        return
+        return memory.createBlock(_template_block(program, want), name, addr, size)
     except TypeError:
         pass
-    # BlockType-based overload: try the permissions variant.
+    try:
+        return memory.createBlock(name, addr, size)
+    except TypeError:
+        pass
     from ghidra.program.model.mem import MemoryBlockType
 
     return memory.createBlock(
@@ -50,11 +61,36 @@ def create_block(entry: object, name: str, address: int, size: int, flags: str) 
         addr,
         size,
         False,
-        "r" in perms,
-        "w" in perms,
-        "x" in perms,
+        want[0],
+        want[1],
+        want[2],
         False,
     )
+
+
+def _template_block(program: object, want: tuple[bool, bool, bool]) -> object:
+    """The initialized block whose (read, write, execute) flags are closest to
+    `want` (tie → first in memory order; exact match short-circuits)."""
+    best = None
+    best_score = None
+    for blk in program.getMemory().getBlocks():
+        if not blk.isInitialized():
+            continue
+        score = sum(
+            a != b for a, b in zip(want, (blk.isRead(), blk.isWrite(), blk.isExecute()), strict=True)
+        )
+        if best_score is None or score < best_score:
+            best, best_score = blk, score
+            if score == 0:
+                break
+    if best is None:
+        from ghmcp.platform.errors import GhmcpError
+
+        raise GhmcpError(
+            "no initialized memory block to use as a createBlock template",
+            hint="open a program with initialized memory first",
+        )
+    return best
 
 
 def rebase(entry: object, new_base: int) -> None:
@@ -81,7 +117,7 @@ def diff_functions(a: object, b: object) -> dict:
 MAX_DIFF_BYTES = 16 * 1024 * 1024  # cap a single bytes-diff allocation (~§7 bounded tool design)
 
 
-def diff_bytes(program_a: object, program_b: object, start: int, end: int) -> dict:
+def diff_bytes(program_a: object, program_b: object, start: int, end: int, a_name: str = "a", b_name: str = "b") -> dict:
     if end < start:
         raise BadTarget("diff range end before start", hint="pass start <= end")
     length = end - start + 1
@@ -90,8 +126,8 @@ def diff_bytes(program_a: object, program_b: object, start: int, end: int) -> di
             f"diff range is {length} bytes (cap {MAX_DIFF_BYTES})",
             hint="split the range or use mode='functions'",
         )
-    abytes = _read_range(program_a, start, length)
-    bbytes = _read_range(program_b, start, length)
+    abytes = read_bytes(program_a, start, length, a_name)
+    bbytes = read_bytes(program_b, start, length, b_name)
     differing = [i for i in range(length) if abytes[i] != bbytes[i]]
     return {
         "start": start,
@@ -154,15 +190,25 @@ def _fn_index(program: object) -> dict:
     return {str(fn.getName()): int(fn.getEntryPoint().getOffset()) for fn in fm.getFunctions(True)}
 
 
-def _read_range(program: object, start: int, length: int) -> bytes:
+def read_bytes(program: object, start: int, length: int, side: str = "") -> bytes:
+    """Shared memory read for read_memory and diff_bytes: raise on any
+    memory-subsystem failure (never zero-fill — an unreadable span must not
+    compare as equal to anything, and a read error must surface as one
+    GhmcpError with a hint, not a raw JPype exception)."""
     from jpype import JArray, JByte
 
     addr = _addr(program, start)
     out = JArray(JByte)(length)
     try:
         program.getMemory().getBytes(addr, out)
-    except BaseException:
-        return b"\x00" * length
+    except BaseException as exc:
+        from ghmcp.platform.errors import GhmcpError
+
+        who = f" ({side})" if side else ""
+        raise GhmcpError(
+            f"cannot read {length} bytes at {start:#x}{who}: {exc}",
+            hint="the span likely falls outside initialized memory; restrict reads/diffs to mapped blocks",
+        ) from exc
     try:
         return bytes(out)
     except Exception:

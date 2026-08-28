@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from ghmcp.platform.config import Settings
@@ -10,11 +10,8 @@ from ghmcp.platform.config import Settings
 
 @dataclass
 class ServiceCtx:
-    errors: Any = None  # module handle used by services for hints (mutable-free placeholder)
     settings: Settings | None = None
     adapter: Any | None = None
-    current_program: str | None = None
-    extra: dict[str, Any] = field(default_factory=dict)
 
     def require_settings(self) -> Settings:
         if self.settings is None:

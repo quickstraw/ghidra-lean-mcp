@@ -387,7 +387,7 @@ Open (or reuse) a binary in Ghidra; ops apply to the current program.
 Manage open programs (list/info/select/close/save/env).
 
 - Timeout: 30s
-- Read-only: True
+- Read-only: False
 
 ### Parameters
 
@@ -1137,6 +1137,11 @@ Read raw memory at an address as hex, ascii or words.
     },
     "data": {
       "title": "Data",
+      "type": "string"
+    },
+    "format": {
+      "default": "hex",
+      "title": "Format",
       "type": "string"
     },
     "truncated": {
@@ -2535,7 +2540,7 @@ Set a plate/pre/eol/post comment at an address.
 List/create memory blocks or rebase the image base (write for create/rebase).
 
 - Timeout: 30s
-- Read-only: True
+- Read-only: False
 
 ### Parameters
 

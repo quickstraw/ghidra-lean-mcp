@@ -163,6 +163,10 @@ class ProjectManager:
                 self._lock_fd = None
         self._project = None
 
+    def project(self) -> object:
+        """Return the live Ghidra project for APIs that need project context."""
+        return self._open_project()
+
     def list_programs(self) -> list[str]:
         import pyghidra
 

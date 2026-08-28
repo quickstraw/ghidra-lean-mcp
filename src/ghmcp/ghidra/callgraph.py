@@ -20,7 +20,7 @@ MAX_DEPTH = 5
 
 def call_graph(entry: object, request: CallGraphRequest) -> CallGraphPage:
     program = entry.program
-    root = lookup_function(program, request.target)
+    root = lookup_function(program, request.target, entry)
     depth = max(1, min(request.depth, MAX_DEPTH))
     page = CallGraphPage(
         root=_brief(root, 0, ""),
@@ -39,7 +39,7 @@ def call_graph(entry: object, request: CallGraphRequest) -> CallGraphPage:
         page.callees = rows
         page.truncated = page.truncated or truncated
     if request.path_to:
-        path = _find_path(program, root, request.path_to)
+        path = _find_path(entry, program, root, request.path_to)
         page.path = path
     return page
 
@@ -99,10 +99,10 @@ def _expand_callees(program: object, fn: object):
         return []
 
 
-def _find_path(program: object, root: object, target_token: str) -> list[FunctionBrief]:
+def _find_path(entry: object, program: object, root: object, target_token: str) -> list[FunctionBrief]:
     """Shortest callers-path root → target (target calls root back)."""
     try:
-        dest = lookup_function(program, target_token)
+        dest = lookup_function(program, target_token, entry)
     except NotFound:
         return []
     if dest is root:

@@ -27,8 +27,6 @@ def serve(
 ) -> None:
     """Start the MCP server."""
     settings = get_settings(fake=fake)
-    if fake:
-        settings.warm_jvm = False
 
     from ghmcp.server import build_server
 
@@ -179,7 +177,7 @@ def ext_install(
         record = get_extension(ext_id)
         artifact = manager.resolve_artifact(record, local_path=local)
         result = manager.install_zip(record, artifact)
-        typer.echo(f"{result.ext_id}: {result.state} — {result.detail}")
+        typer.echo(f"{result.ext_id}: {result.state} - {result.detail}")
     manager.shutdown()
     typer.echo("restart required: extension jars enter the classpath at launch (plan §0.2)")
 
@@ -248,7 +246,7 @@ def ext_uninstall(
 def ext_build(
     extension: Annotated[str, typer.Argument(help="Extension id from registry.toml")],
 ) -> None:
-    """Build from source (gradle) into the cache — no install."""
+    """Build from source (gradle) into the cache - no install."""
     settings = get_settings()
     from ghmcp.extensions.builder import build_from_source
     from ghmcp.extensions.catalog import get_extension
@@ -279,7 +277,7 @@ def doctor() -> None:
     )
     typer.echo(f"  projects_dir:      {settings.projects_dir}")
     typer.echo(f"  ext_cache_dir:     {settings.ext_dir}")
-    typer.echo("  booting preview JVM (throws the real thing at it)…")
+    typer.echo("  booting preview JVM (throws the real thing at it)...")
     try:
         manager = _manager(
             settings,
@@ -290,7 +288,7 @@ def doctor() -> None:
             local=None,
         )
     except Exception as exc:
-        typer.echo(f"  JVM: unavailable — {exc}")
+        typer.echo(f"  JVM: unavailable - {exc}")
         return
     assert manager._jvm is not None
     info = manager._jvm.info()

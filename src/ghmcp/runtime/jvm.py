@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import threading
 from pathlib import Path
 
 from ghmcp.platform.config import Settings
@@ -38,14 +39,20 @@ class JvmManager:
         self._launcher = None
         self._started = False
         self._info: dict = {"version": None, "extension_dir": None, "install_dir": None}
+        self._start_lock = threading.Lock()
 
     @property
     def started(self) -> bool:
         return self._started
 
     def start(self) -> dict:
-        if self._started:
-            return self._info
+        """Idempotent; thread-safe (warm_jvm=False lazy-boots from a worker thread)."""
+        with self._start_lock:
+            if self._started:
+                return self._info
+            return self._start_locked()
+
+    def _start_locked(self) -> dict:
         if self.settings.fake:
             raise ConfigError("fake mode — do not start the JVM")
 

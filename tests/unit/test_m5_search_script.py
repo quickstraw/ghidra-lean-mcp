@@ -12,7 +12,8 @@ from ghmcp.services import search as search_svc
 def _ctx() -> ServiceCtx:
     adapter = FakeAdapter()
     pid = adapter.open(OpenSpec(path="test.bin")).pid
-    return ServiceCtx(adapter=adapter, current_program=pid)
+    adapter.select(pid)
+    return ServiceCtx(adapter=adapter)
 
 
 # ------------------------------------------------------------------ search_binary
@@ -85,3 +86,12 @@ def test_run_script_ghidra_script_requires_path():
 
     with pytest.raises(TaskFailed):
         script_svc.run(script_svc.RunScriptParams(kind="ghidra_script"), ctx)
+
+
+def test_scan_utf8_preserves_binary_addresses():
+    from ghmcp.ghidra.strings import _scan_utf8
+
+    assert list(_scan_utf8(b"\x00A\xffBC\x00", 0x1000)) == [
+        (0x1001, "A"),
+        (0x1003, "BC"),
+    ]

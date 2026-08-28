@@ -56,8 +56,11 @@ task.
 
 ## Performance design
 
-- One process, one JVM, started once in the MCP lifespan.
-- Eager warmup by default; Ghidra work runs on a long-lived JVM worker pool.
+- One process, one JVM, started once in the MCP lifespan (`warm_jvm=True`,
+  the default). With `warm_jvm=False` the boot is deferred to the first
+  adapter call (`_bootstrap`); `JvmManager.start()` is thread-safe and
+  idempotent, so the boot can happen on a worker thread.
+- Ghidra work runs on a long-lived JVM worker pool.
 - `DecompInterface` methods are `synchronized` and each instance owns a native
   decompiler, so the decompiler pool is a requirement for concurrency, not an
   optimisation. The pool caches formatted results keyed by
@@ -72,9 +75,31 @@ task.
 
 ## Where the write paths live
 
+Every program access is serialized by the per-session RWLock
+(`runtime/session.py`): read tools (`decompile`, `disassemble`, xrefs,
+symbols, search, memory reads, snapshots, diffs) acquire it shared; mutations,
+`save` and `close` acquire it exclusively, with a timeout
+(`program_lock_timeout`, default 30s) that raises `BusyError` instead of
+hanging a worker. Lock order is always program-lock → decompiler lease, and a
+two-program diff locks both pids in pid order — both rules make deadlocks
+impossible. `decompile` holds the read lock per function (wave members), so a
+write can interleave between functions of a large batch, and the analysis task
+deliberately takes no lock — analysis is incremental under Ghidra's own locks
+and stalling all reads for minutes is worse; `close()` drains analysis tasks
+first in `shutdown()`.
+
+`run_script` always takes the exclusive lock: a script body can mutate via the
+flat API (it may open its own transaction), so a possible mutator must never
+race concurrent readers; a writable session additionally wraps each script
+call in a transaction, and `write=true` is gated at the service layer.
+`read_memory` and `diff_bytes` share one read helper (`game.read_bytes`), so a
+read failure surfaces as the same `GhmcpError` with the same hint from both
+tools.
+
 Writes (`rename`, `set_prototype`, `types`, `set_comment`, `memory_map
 create/rebase`) run inside exactly one transaction (`runtime/txn.py`) and roll
-back on error. They are gated on a writable session (`open_program(writable=true)`);
-a write to a read-only session is a `ReadOnly` error. `analysis(action="run")`
-is the exception — it runs without the writable gate because open_program
-auto-analyses read-only sessions too.
+back on error — the txn shim supports both Ghidra 11.x int handles and the
+12.x `DomainObjectTransaction` objects. They are gated on a writable session
+(`open_program(writable=true)`); a write to a read-only session is a
+`ReadOnly` error. `analysis(action="run")` is the exception — it runs without
+the writable gate because open_program auto-analyses read-only sessions too.

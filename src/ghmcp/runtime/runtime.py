@@ -39,16 +39,21 @@ class Runtime:
             from ghmcp.runtime.jvm import JvmManager
 
             self.jvm = JvmManager(self.settings)
-            try:
-                self.jvm.start()
-            except ConfigError:
-                raise
-            except Exception as exc:
-                raise ConfigError(
-                    f"JVM failed to start: {exc}",
-                    hint="is GHIDRA_INSTALL_DIR set to the extracted Ghidra release?",
-                ) from exc
+            if self.settings.warm_jvm:
+                self._start_jvm(self.jvm)
         self.started = True
+
+    @staticmethod
+    def _start_jvm(jvm: object) -> None:
+        try:
+            jvm.start()
+        except ConfigError:
+            raise
+        except Exception as exc:
+            raise ConfigError(
+                f"JVM failed to start: {exc}",
+                hint="is GHIDRA_INSTALL_DIR set to the extracted Ghidra release?",
+            ) from exc
 
     def attach_adapter(self, adapter: Any) -> None:
         """Server wires the adapter in after start(): runtime may not import ghidra (layering)."""

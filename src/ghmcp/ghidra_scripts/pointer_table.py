@@ -6,11 +6,11 @@
 # Reads a memory region as a table of little-endian 32-bit pointers and prints a
 # JSON line with each entry address and its target (resolved to a symbol when the
 # target is a function/label). Use for localization/string-table hunting.
-# ruff: noqa: F821  # `currentProgram` and `args` come from the Ghidra script engine.
+# ruff: noqa: F821  # Ghidra script API names come from the script engine.
 
 import json
 
-args = globals().get("args") or []  # supplied by the runner's args list
+args = list(getScriptArgs())  # supplied by the runner's args list
 start = int(args[0], 0) if len(args) > 0 else int(currentProgram.getImageBase().getOffset())
 end = int(args[1], 0) if len(args) > 1 else start + 0x4000
 

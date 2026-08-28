@@ -18,42 +18,103 @@ from ghmcp.services import xrefs as xrefs_svc
 def _ctx() -> tuple[FakeAdapter, ServiceCtx]:
     adapter = FakeAdapter()
     pid = adapter.open(OpenSpec(path="test.bin")).pid
-    return adapter, ServiceCtx(adapter=adapter, current_program=pid)
+    adapter.select(pid)
+    return adapter, ServiceCtx(adapter=adapter)
+
+
+# ------------------------------------------------------------------ index-backed function lookup
+
+
+class _FSym:
+    def __init__(self, name: str):
+        self._name = name
+
+    def getName(self):
+        return self._name
+
+
+class _StubFM:
+    def __init__(self, names: list[str]):
+        self._names = names
+
+    def getFunctions(self, _flag):
+        return [_FSym(n) for n in self._names]
+
+
+class _StubProgram:
+    def __init__(self, names: list[str]):
+        self._fm = _StubFM(names)
+
+    def getFunctionManager(self):
+        return self._fm
+
+    def getModificationNumber(self):
+        return 0
+
+    def getAddressFactory(self):
+        raise AssertionError("address factory must not be touched for name-only queries")
+
+
+def test_lookup_function_uses_session_index_and_matches_linear():
+    from ghmcp.ghidra.decomp import build_name_index
+    from ghmcp.ghidra.listing import lookup_function
+
+    names = ["Foo", "foo", "foobar", "play_song"]
+    prog = _StubProgram(names)
+    exact, buckets = build_name_index([(n, _FSym(n)) for n in names])
+    entry = type("E", (), {"fn_index": (0, exact, buckets)})()
+
+    assert lookup_function(prog, "play_song", entry).getName() == "play_song"
+    assert lookup_function(prog, "PLAY_SONG", entry).getName() == "play_song"  # ci exact
+    assert lookup_function(prog, "play", entry).getName() == "play_song"  # prefix
+    with pytest.raises(NotFound):
+        lookup_function(prog, "zzzz", entry)
+
+
+def test_lookup_function_linear_path_falls_back_without_entry():
+    from ghmcp.ghidra.listing import lookup_function
+
+    prog = _StubProgram(["Foo", "foo", "foobar"])
+    assert lookup_function(prog, "foo").getName() == "foo"  # exact beats ci-exact
+    assert lookup_function(prog, "FOO").getName() == "Foo"  # ci-exact
+    assert lookup_function(prog, "foob").getName() == "foobar"  # prefix
+    with pytest.raises(NotFound):
+        lookup_function(prog, "nope")
 
 
 # ------------------------------------------------------------------ resolve
 
 
 def test_resolve_address_and_suffix():
-    _adapter, ctx = _ctx()
-    r = resolve_svc.resolve(_adapter, ctx.current_program, "0x2000")
+    _adapter, _ = _ctx()
+    r = resolve_svc.resolve(_adapter, _adapter.current(), "0x2000")
     assert (r.start, r.end) == (0x2000, 0x2000)
     assert not r.is_range
     assert r.symbol is None
 
 
 def test_resolve_range_and_window():
-    _adapter, ctx = _ctx()
-    r = resolve_svc.resolve(_adapter, ctx.current_program, "0x1000-0x2000")
+    _adapter, _ = _ctx()
+    r = resolve_svc.resolve(_adapter, _adapter.current(), "0x1000-0x2000")
     assert r.is_range and (r.start, r.end) == (0x1000, 0x2000)
-    r = resolve_svc.resolve(_adapter, ctx.current_program, "0x4000+0x10")
+    r = resolve_svc.resolve(_adapter, _adapter.current(), "0x4000+0x10")
     assert r.is_range and (r.start, r.end) == (0x4000, 0x400F)
 
 
 def test_resolve_symbol_and_name_at_addr():
-    _adapter, ctx = _ctx()
-    r = resolve_svc.resolve(_adapter, ctx.current_program, "main")
+    _adapter, _ = _ctx()
+    r = resolve_svc.resolve(_adapter, _adapter.current(), "main")
     assert r.symbol == "main" and r.start == 0x2000
-    r = resolve_svc.resolve(_adapter, ctx.current_program, "Play_song")
+    r = resolve_svc.resolve(_adapter, _adapter.current(), "Play_song")
     assert r.symbol == "play_song" and r.start == 0x1000
-    r = resolve_svc.resolve(_adapter, ctx.current_program, "main@0x2100")
+    r = resolve_svc.resolve(_adapter, _adapter.current(), "main@0x2100")
     assert r.start == 0x2100 and r.symbol == "main"
 
 
 def test_resolve_miss_suggests():
-    _adapter, ctx = _ctx()
+    _adapter, _ = _ctx()
     with pytest.raises(NotFound) as ei:
-        resolve_svc.resolve(_adapter, ctx.current_program, "playsong")
+        resolve_svc.resolve(_adapter, _adapter.current(), "playsong")
     hint = ei.value.hint or ""
     assert "did you mean" in hint and "play_song" in hint
 
@@ -61,9 +122,9 @@ def test_resolve_miss_suggests():
 def test_resolve_miss_fallback_hint_not_bare():
     """A total miss with no close candidate must yield the plain fallback, not a
     bare 'did you mean: ' (the +/or precedence trap leaves a trailing colon)."""
-    _adapter, ctx = _ctx()
+    _adapter, _ = _ctx()
     with pytest.raises(NotFound) as ei:
-        resolve_svc.resolve(_adapter, ctx.current_program, "zzzqqxx")
+        resolve_svc.resolve(_adapter, _adapter.current(), "zzzqqxx")
     hint = (ei.value.hint or "").strip()
     assert hint and hint != "did you mean:"
 
@@ -71,14 +132,14 @@ def test_resolve_miss_fallback_hint_not_bare():
 def test_resolve_precedence_matches_listing_prefix():
     """resolve must pick the first prefix match like listing/decompile do, not
     raise Ambiguous on a shared prefix (otherwise xrefs disagrees with decompile)."""
-    _adapter, ctx = _ctx()
-    r = resolve_svc.resolve(_adapter, ctx.current_program, "pla")
+    _adapter, _ = _ctx()
+    r = resolve_svc.resolve(_adapter, _adapter.current(), "pla")
     assert r.symbol == "play_song"
 
 
 def test_suggest_returns_close_names():
-    _adapter, ctx = _ctx()
-    got = resolve_svc.suggest(_adapter, ctx.current_program, "pla_sng")
+    _adapter, _ = _ctx()
+    got = resolve_svc.suggest(_adapter, _adapter.current(), "pla_sng")
     assert "play_song" in got
 
 

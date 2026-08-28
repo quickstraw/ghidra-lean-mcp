@@ -574,6 +574,15 @@ class FakeAdapter:
         a = self._require(a_pid)
         b = self._require(b_pid)
         da, db = a["bytes"], b["bytes"]
+        # Mirror the real backend: a window outside the address space raises
+        # instead of comparing zero-filled bytes (never a silent false "equal").
+        for side, window_data in (("a", da), ("b", db)):
+            if start < 0 or start + length > len(window_data):
+                raise GhmcpError(
+                    f"cannot read {length} bytes at {start:#x} ({side})",
+                    hint="the span likely falls outside initialized memory; "
+                    "restrict reads/diffs to mapped blocks",
+                )
         xa = _window(da, start, length)
         xb = _window(db, start, length)
         differing = [i for i in range(min(len(xa), len(xb))) if xa[i] != xb[i]]
@@ -674,14 +683,11 @@ def _fn_index(entry: dict) -> dict:
 
 
 def _window(data: bytes, start: int, length: int) -> bytes:
-    """Linear read of [start, start+length) with zero-fill OOB — matches the real
-    backend's game._read_range semantics (no modulo wrap)."""
-    out = bytearray(length)
-    for i in range(length):
-        idx = start + i
-        if 0 <= idx < len(data):
-            out[i] = data[idx]
-    return bytes(out)
+    """Linear read of [start, start+length).
+
+    Callers bounds-check first (matching game._read_range, which never
+    zero-fills out-of-space windows), so this is a plain slice."""
+    return data[start : start + length]
 
 
 def _iter_fake_refs(entry: dict, start: int, end: int, direction: str):

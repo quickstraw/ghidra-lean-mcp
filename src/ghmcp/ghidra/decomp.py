@@ -23,7 +23,9 @@ from ghmcp.platform.targets import parse_address
 from ghmcp.platform.telemetry import log_event
 
 
-def decompile_program(entry: object, request: DecompileRequest, pool: object) -> list[DecompiledFn]:
+def decompile_program(
+    entry: object, request: DecompileRequest, pool: object, lock_timeout: float | None = None
+) -> list[DecompiledFn]:
     """Resolve each target to a function and decompile; never fail the batch on
     one function (it degrades that entry only).
 
@@ -66,10 +68,26 @@ def decompile_program(entry: object, request: DecompileRequest, pool: object) ->
             for fn, target in todo[start : start + wave]:
                 if time.monotonic() > deadline:
                     break
+                # Lock order (session.py): program lock BEFORE the pool lease.
+                # Every acquire is paired 1:1 with a release: ownership moves
+                # to _decompile_one only when a future is successfully submitted
+                # (it releases both, in inverse order); on any earlier failure
+                # we release what we hold — a leaked read lock would wedge
+                # writes on this program for the rest of the session.
+                try:
+                    entry.lock.acquire_read(timeout=lock_timeout)
+                except BusyError:
+                    # A writer is waiting: degrade the remaining targets, never
+                    # abort the batch.
+                    break
                 try:
                     iface, lease = pool.acquire(program, entry.pid)
                 except BusyError:
+                    entry.lock.release_read()
                     break  # degrade this and the remaining targets, never abort the batch
+                except BaseException:
+                    entry.lock.release_read()
+                    raise
                 try:
                     leased.append(
                         (
@@ -89,6 +107,7 @@ def decompile_program(entry: object, request: DecompileRequest, pool: object) ->
                     )
                 except BaseException:
                     pool.release(lease)
+                    entry.lock.release_read()
                     raise
             for target, fut in leased:
                 try:
@@ -156,7 +175,9 @@ def _decompile_one(
             pool.cache_put(entry.pid, f"fn:{target}", mod, lines)
         return int(fn.getEntryPoint().getOffset()), lines
     finally:
+        # Release in inverse acquisition order (lock → lease); both are ours.
         pool.release(lease)
+        entry.lock.release_read()
 
 
 def _pool_workers(pool: object) -> int:
@@ -265,7 +286,7 @@ def _name_index(
     entry: object, program: object, fm: object
 ) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
     """Session-scoped cache, rebuilt when the program's modification number
-    changes; freed by SessionEntry.clear_index() on program close."""
+    changes; freed when close() drops the SessionEntry."""
     try:
         mod = int(program.getModificationNumber())
     except Exception:

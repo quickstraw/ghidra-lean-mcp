@@ -17,7 +17,8 @@ MEMORY_MAP_SPEC = ToolSpec(
     service=game_svc.memory_map_run,
     summarize=lambda r: f"memory_map[{r.action}]: {len(r.blocks)} block(s)",
     timeout=30.0,
-    annotations=_READ,
+    # list is read-only, but create/rebase write the imported program.
+    annotations=_WRITE,
 )
 
 DIFF_SPEC = ToolSpec(

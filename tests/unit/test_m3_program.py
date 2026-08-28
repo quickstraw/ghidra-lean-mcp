@@ -22,7 +22,8 @@ def _adapter(analyze: str = "auto", writable: bool = False) -> tuple[FakeAdapter
     info = adapter.open(
         OpenSpec(path="test.bin", analyze=analyze, writable=writable, language="FAKE:LE:32:default")
     )
-    return adapter, ServiceCtx(adapter=adapter, current_program=info.pid), info.pid
+    adapter.select(info.pid)  # current program is adapter state, not ServiceCtx (services read adapter.current())
+    return adapter, ServiceCtx(adapter=adapter), info.pid
 
 
 # ------------------------------------------------------------------ open_program

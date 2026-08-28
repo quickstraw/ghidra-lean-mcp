@@ -19,6 +19,18 @@ from ghmcp.platform.errors import BadTarget
 from ghmcp.platform.targets import parse_address, parse_range
 
 
+def _jbytes(values) -> object:
+    """Convert Python int byte values (0..255) to a Java signed ``byte[]``.
+
+    JPype raises ``OverflowError`` when a value >= 128 is passed to
+    ``JArray(JByte)`` (Java bytes are signed -128..127), so map 0..255 onto
+    the signed range.
+    """
+    from jpype import JArray, JByte
+
+    return JArray(JByte)([int(v) - 256 if int(v) >= 128 else int(v) for v in values])
+
+
 def search_page(program: object, request: SearchQuery) -> list[Hit]:
     if request.mode == "bytes":
         return _bytes(program, request)
@@ -55,10 +67,9 @@ def _bytes(program: object, request: SearchQuery) -> list[Hit]:
     start, end = _bounds(program, request.range_)
     memory = program.getMemory()
     from ghidra.util.task import TaskMonitor
-    from jpype import JArray, JByte
 
-    jpat = JArray(JByte)([b & 0xFF for b in pat])
-    jmask = JArray(JByte)([m & 0xFF for m in mask])
+    jpat = _jbytes([b & 0xFF for b in pat])
+    jmask = _jbytes([m & 0xFF for m in mask])
     hits: list[Hit] = []
     addr = start
     while len(hits) < request.limit:
@@ -83,16 +94,20 @@ def _text(program: object, request: SearchQuery) -> list[Hit]:
     start, end = _bounds(program, request.range_)
     hits: list[Hit] = []
     memory = program.getMemory()
-    block_start = start
-    while True:
-        block = memory.getBlock(block_start)
-        if block is None or block.getStart().getOffset() > end.getOffset():
-            break
-        raw = _block_bytes(block)
+    start_off, end_off = int(start.getOffset()), int(end.getOffset())
+    for block in memory.getBlocks() or []:
+        if not block.isInitialized():
+            continue
+        block_off = int(block.getStart().getOffset())
+        block_end = int(block.getEnd().getOffset())
+        if block_end < start_off or block_off > end_off:
+            continue
+        raw = _block_bytes(memory, block)
         if raw is not None:
-            block_off = int(block.getStart().getOffset())
-            lo = start.getOffset() - block_off
-            hi = end.getOffset() - block_off
+            lo = max(0, start_off - block_off)
+            hi = min(len(raw) - 1, end_off - block_off)
+            if hi < lo:
+                continue
             window = raw[max(0, lo) : min(len(raw), hi + 1)]
             needle = pat
             idx = 0
@@ -104,10 +119,8 @@ def _text(program: object, request: SearchQuery) -> list[Hit]:
                 preview = window[pos : pos + min(32, len(needle) * 2)].decode("latin-1", "replace")
                 hits.append(Hit(address=addr, kind="text", preview=preview))
                 idx = pos + 1
-        nxt = block.getNext()
-        if nxt is None or nxt.getOffset() > end.getOffset():
+        if len(hits) >= request.limit:
             break
-        block_start = nxt
     return hits
 
 
@@ -118,8 +131,10 @@ def _instructions(program: object, request: SearchQuery) -> list[Hit]:
         raise BadTarget(f"invalid instruction regex: {exc}") from None
     start, end = _bounds(program, request.range_)
     listing = program.getListing()
+    from ghmcp.ghidra.listing import instructions_in_range
+
     hits: list[Hit] = []
-    for insn in _iter(listing.getInstructions(start, end, True)):
+    for insn in _iter(instructions_in_range(listing, start, end)):
         text = str(insn)
         if rx.search(text):
             hits.append(Hit(address=int(insn.getAddress().getOffset()), kind="instructions", preview=text))
@@ -136,8 +151,10 @@ def _scalars(program: object, request: SearchQuery) -> list[Hit]:
         )
     start, end = _bounds(program, request.range_)
     listing = program.getListing()
+    from ghmcp.ghidra.listing import instructions_in_range
+
     hits: list[Hit] = []
-    for insn in _iter(listing.getInstructions(start, end, True)):
+    for insn in _iter(instructions_in_range(listing, start, end)):
         for idx in range(insn.getNumOperands() or 1):
             try:
                 scalar = insn.getScalar(idx)
@@ -213,13 +230,13 @@ def _next_addr(program: object, addr: object):
     return space.getAddress(addr.getOffset() + 1)
 
 
-def _block_bytes(block: object) -> bytes | None:
+def _block_bytes(memory: object, block: object) -> bytes | None:
     try:
         from jpype import JArray, JByte
 
         size = int(block.getSize())
         out = JArray(JByte)(size)
-        block.getData(out, 0, size)
+        memory.getBytes(block.getStart(), out)
         try:
             return bytes(out)
         except Exception:

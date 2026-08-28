@@ -41,7 +41,9 @@ SESSION_SPEC = ToolSpec(
         + (f", ghidra {r.env.ghidra_version}" if r.env else "")
     ),
     timeout=30.0,
-    annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False),
+    # The action is mixed: list/info/env/select read state, while close/save
+    # mutate the server/project, so advertise the safe aggregate contract.
+    annotations=ToolAnnotations(read_only_hint=False, idempotent_hint=False, open_world_hint=False),
 )
 
 DECOMPILE_SPEC = ToolSpec(

@@ -42,6 +42,7 @@ class ReadResult(Model):
     address: str
     length: int
     data: str
+    format: str = "hex"
     truncated: bool = False
     typed: list[TypedValue] | None = None  # only when format="typed"
 
@@ -96,12 +97,15 @@ def read_run(params: ReadParams, ctx: ServiceCtx) -> ReadResult:
             address=fmt.hexaddr(value),
             length=params.length,
             data=_render_typed(values),
+            format=params.format,
             typed=values,
         )
 
     data = adapter.read(pid, value, params.length)
     rendered = _render(data, params.format)
-    return ReadResult(address=fmt.hexaddr(value), length=params.length, data=rendered)
+    return ReadResult(
+        address=fmt.hexaddr(value), length=params.length, data=rendered, format=params.format
+    )
 
 
 def _render(data: bytes, fmt_mode: str) -> str:

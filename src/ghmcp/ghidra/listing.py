@@ -22,17 +22,17 @@ def listing_program(entry: object, request: InstructionsRequest) -> list[Insn]:
                 "disassemble range needs end after start",
                 hint="pass end=0x… after start (e.g. target='range', start=0x1000, end=0x1200)",
             )
-        iterator = listing.getInstructions(start, end, True)
+        iterator = instructions_in_range(listing, start, end)
         return _collect(iterator, include_bytes, request.count or 500)
     if target == "bytes":
         if request.length is None:
             raise BadTarget("target='bytes' needs length")
         start = _address(program, request.start)
         end = _address(program, hex(start.getOffset() + request.length))
-        iterator = listing.getInstructions(start, end, True)
+        iterator = instructions_in_range(listing, start, end)
         return _collect(iterator, include_bytes, request.count or 500)
     if target == "function":
-        fn = lookup_function(program, request.start)
+        fn = lookup_function(program, request.start, entry)
         body = fn.getBody()
         start = body.getMinAddress()
         if start is None:
@@ -54,11 +54,15 @@ def listing_program(entry: object, request: InstructionsRequest) -> list[Insn]:
     )
 
 
-def lookup_function(program: object, name_or_addr: str) -> object:
-    """Canonical function resolution shared by disassemble/decompile:
+def lookup_function(program: object, name_or_addr: str, entry: object = None) -> object:
+    """Canonical function resolution shared by disassemble/decompile/annotate:
     address → function at/containing; else exact name; else case-insensitive
     exact; else case-insensitive prefix. Raises NotFound on a miss. Whitespace
-    is normalized the same way decompile normalizes its targets."""
+    is normalized the same way decompile normalizes its targets.
+
+    When `entry` is given, the name path runs against the session-scoped
+    index (decomp._name_index, cached by modification number) — the O(N)
+    `getFunctions` scan is paid once per modification, not per call."""
     name_or_addr = name_or_addr.strip()
     if not name_or_addr:
         raise BadTarget("empty function target", hint="pass a name or address")
@@ -74,6 +78,24 @@ def lookup_function(program: object, name_or_addr: str) -> object:
         if fn is not None:
             return fn
 
+    fn = _resolve_name(program, fm, name_or_addr, entry)
+    if fn is not None:
+        return fn
+    raise NotFound(
+        f"no function at or named {name_or_addr!r}",
+        hint="check the exact name with find_symbols, or pass a plain address",
+    )
+
+
+def _resolve_name(program: object, fm: object, name_or_addr: str, entry: object) -> object | None:
+    """Name path with the same precedence either way; the index is a cache
+    over exactly the same function enumeration (getFunctions(True))."""
+    if entry is not None:
+        from ghmcp.ghidra.decomp import _name_index, lookup_in_index
+
+        exact, buckets = _name_index(entry, program, fm)
+        return lookup_in_index(exact, buckets, name_or_addr)
+
     low = name_or_addr.lower()
     ci_exact = None
     fallback = None
@@ -85,14 +107,7 @@ def lookup_function(program: object, name_or_addr: str) -> object:
             ci_exact = ci_exact or cand
         elif n.lower().startswith(low) and fallback is None:
             fallback = cand
-    if ci_exact is not None:
-        return ci_exact
-    if fallback is not None:
-        return fallback
-    raise NotFound(
-        f"no function at or named {name_or_addr!r}",
-        hint="check the exact name with find_symbols, or pass a plain address",
-    )
+    return ci_exact or fallback
 
 
 def lookup_symbol(program: object, name_or_addr: str) -> object:
@@ -234,3 +249,12 @@ def _make_iterator(iterator: object):
     else:
         it = iterator
     return it
+
+
+def instructions_in_range(listing: object, start: object, end: object) -> object:
+    """Use Listing's AddressSetView overload (the 3-arg overload was removed in 12.x)."""
+    from ghidra.program.model.address import AddressSet
+
+    address_set = AddressSet()
+    address_set.add(start, end)
+    return listing.getInstructions(address_set, True)

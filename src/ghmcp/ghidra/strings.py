@@ -74,8 +74,9 @@ def _scan(program: object, request: StringQuery) -> tuple[list[StringEntry], boo
     min_len = max(request.min_length or 4, 4)
 
     def gen():
+        memory = program.getMemory()
         for block in _blocks(program):
-            raw = _block_bytes(block)
+            raw = _block_bytes(memory, block)
             if raw is None:
                 continue
             base = int(block.getStart().getOffset())
@@ -97,7 +98,10 @@ def _scan(program: object, request: StringQuery) -> tuple[list[StringEntry], boo
 
 
 def _scan_utf8(raw: bytes, base: int):
-    text = raw.decode("utf-8", errors="ignore")
+    # Preserve a one-byte-to-one-address mapping.  UTF-8 decoding with
+    # errors="ignore" would delete invalid bytes in arbitrary binaries and
+    # join unrelated printable fragments into a false string.
+    text = raw.decode("latin-1")
     for m in _PRINTABLE_RUNS.finditer(text):
         yield base + m.start(), m.group(0)
 
@@ -125,13 +129,13 @@ def _blocks(program: object):
         return
 
 
-def _block_bytes(block: object) -> bytes | None:
+def _block_bytes(memory: object, block: object) -> bytes | None:
     try:
         from jpype import JArray, JByte
 
         size = int(block.getSize())
         out = JArray(JByte)(size)
-        block.getData(out, 0, size)
+        memory.getBytes(block.getStart(), out)
         try:
             return bytes(out)
         except Exception:

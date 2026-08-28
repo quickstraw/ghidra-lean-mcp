@@ -15,8 +15,8 @@ def _ctx(writable: bool = False) -> tuple[FakeAdapter, ServiceCtx, str]:
     adapter = FakeAdapter()
     p1 = adapter.open(OpenSpec(path="a.bin", writable=writable)).pid
     p2 = adapter.open(OpenSpec(path="b.bin", writable=writable)).pid
-    # Mainstream the fake's two programs differ so a diff has signal.
-    return adapter, ServiceCtx(adapter=adapter, current_program=p1), p2
+    adapter.select(p1)  # the two fake programs differ so a diff has signal
+    return adapter, ServiceCtx(adapter=adapter), p2
 
 
 # ------------------------------------------------------------------ memory_map
@@ -51,21 +51,36 @@ def test_memory_map_create_read_only_raises():
 
 def test_diff_functions():
     _adapter, ctx, p2 = _ctx()
-    res = game_svc.diff_run(game_svc.DiffParams(a=ctx.current_program, b=p2, mode="functions"), ctx)
+    res = game_svc.diff_run(
+        game_svc.DiffParams(a=ctx.adapter.current(), b=p2, mode="functions"), ctx
+    )
     assert res.mode == "functions"
     assert res.a_function_count > 0
 
 
 def test_diff_bytes():
     _adapter, ctx, p2 = _ctx()
+    # Fake address space is 0x800 bytes; an in-space window diffs real data.
     res = game_svc.diff_run(
-        game_svc.DiffParams(a=ctx.current_program, b=p2, mode="bytes", range_="0x1000-0x1010"), ctx
+        game_svc.DiffParams(a=ctx.adapter.current(), b=p2, mode="bytes", range_="0x0100-0x0110"),
+        ctx,
     )
     assert res.mode == "bytes"
     assert res.differing_bytes >= 0
 
 
 # ------------------------------------------------------------------ analysis
+
+
+def test_diff_bytes_unreadable_raises():
+    _adapter, ctx, p2 = _ctx()
+    with pytest.raises(GhmcpError, match="cannot read"):
+        game_svc.diff_run(
+            game_svc.DiffParams(
+                a=ctx.adapter.current(), b=p2, mode="bytes", range_="0xff000000-0xff00000f"
+            ),
+            ctx,
+        )
 
 
 def test_analysis_run_and_status():

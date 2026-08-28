@@ -1,22 +1,35 @@
 """Session state: open programs, handles, current selection, per-program RWLock.
 
 Many readers, one writer per program (plan §5.1). The program Java object
-stays alive for the whole server session; close() releases it.
+stays alive for the whole server session; close() releases it. The per-entry
+`lock` is the real one: every read tool acquires it shared, every mutation and
+`close()`/`save()` exclusively, via `ghidra/backend.py`. Locks carry a timeout
+(`settings.program_lock_timeout`); expiry raises BusyError so contention never
+hangs a worker thread while the tool budget still has time.
+
+Lock ordering rule (deadlock-free): the program lock is always acquired
+BEFORE a decompiler-pool lease (never after), and no op holds two program
+locks at once — a two-program diff acquires both in pid order.
 """
 
 from __future__ import annotations
 
 import contextlib
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from ghmcp.platform.errors import NotFound
+from ghmcp.platform.errors import BusyError, NotFound
 from ghmcp.platform.models import ProgramInfo
 
 
 class RWLock:
-    """Priority-favoring writer lock: writers exclude all, readers share."""
+    """Priority-favoring writer lock: writers exclude all, readers share.
+
+    `acquire_*` take a timeout; on expiry (or during pool shutdown) they raise
+    BusyError so the caller can surface it instead of hanging the worker.
+    """
 
     def __init__(self) -> None:
         self._cv = threading.Condition()
@@ -28,10 +41,11 @@ class RWLock:
     def writer_active(self) -> bool:
         return self._writers > 0
 
-    def acquire_read(self) -> None:
+    def acquire_read(self, timeout: float | None = None) -> None:
+        deadline = _deadline(timeout)
         with self._cv:
             while self._writers > 0 or self._writer_waiting > 0:
-                self._cv.wait()
+                _wait_or_bust(self._cv, deadline, "read")
             self._readers += 1
 
     def release_read(self) -> None:
@@ -40,18 +54,55 @@ class RWLock:
             if self._readers == 0:
                 self._cv.notify_all()
 
-    def acquire_write(self) -> None:
+    def acquire_write(self, timeout: float | None = None) -> None:
+        deadline = _deadline(timeout)
         with self._cv:
             self._writer_waiting += 1
-            while self._writers > 0 or self._readers > 0:
-                self._cv.wait()
-            self._writer_waiting -= 1
-            self._writers += 1
+            timed_out = False
+            try:
+                while self._writers > 0 or self._readers > 0:
+                    try:
+                        _wait_or_bust(self._cv, deadline, "write")
+                    except BaseException:
+                        timed_out = True
+                        raise
+                self._writers += 1
+            finally:
+                self._writer_waiting -= 1
+                if timed_out:
+                    # Readers blocked behind writer_waiting never got a wakeup —
+                    # wake them so they re-check their predicate (the lock may
+                    # be free for reading now) instead of sleeping to deadline.
+                    self._cv.notify_all()
 
     def release_write(self) -> None:
         with self._cv:
             self._writers -= 1
             self._cv.notify_all()
+
+
+def _deadline(timeout: float | None) -> float | None:
+    return None if timeout is None else time.monotonic() + max(0.0, timeout)
+
+
+def _wait_or_bust(cv: threading.Condition, deadline: float | None, mode: str) -> None:
+    if deadline is None:
+        cv.wait()
+        return
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise BusyError(
+            f"program lock busy for {mode}",
+            hint="concurrent tools are holding the program; retry when they drain, "
+            "or raise program_lock_timeout in config",
+        )
+    cv.wait(timeout=remaining)
+    if time.monotonic() >= deadline:
+        raise BusyError(
+            f"program lock busy for {mode}",
+            hint="concurrent tools are holding the program; retry when they drain, "
+            "or raise program_lock_timeout in config",
+        )
 
 
 @dataclass
@@ -67,6 +118,8 @@ class SessionEntry:
     open_flags: dict[str, Any] = field(default_factory=dict)  # writable, analyze, preset
     fn_index: tuple[int, dict[str, Any], dict[str, dict[str, Any]]] | None = None
     """Program-scoped function-name index: (mod, exact, buckets); freed on close."""
+    snap_cache: dict[str, Any] | None = None
+    """Snapshot scratch keyed by modification number ({'entry_points': ...}); freed on close."""
 
     def bump_mod(self, value: int) -> None:
         self.mod_number = value

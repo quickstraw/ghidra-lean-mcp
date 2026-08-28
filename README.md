@@ -73,9 +73,9 @@ launch, so install/uninstall prints `restart required`.
 
 ```bash
 uv run ruff check src tests
-uv run import-linter --config pyproject.toml
+uv run import-linter lint --config pyproject.toml
 uv run pytest tests/unit tests/contract          # no Ghidra needed (fake backend)
-uv run pytest -m live tests/live                 # needs GHIDRA_INSTALL_DIR
+uv run pytest -m live tests/live                 # needs GHIDRA_INSTALL_DIR (faulthandler is disabled in the live conftest)
 uv run pytest -m perf tests/perf                 # §5.5 perf gates
 ```
 

@@ -59,6 +59,10 @@ class GhidraBackend:
         call raises instead of re-creating native state while teardown runs."""
         if self._closed:
             raise GhmcpError("the server is shutting down", hint="retry after the server restarts")
+        if self._jvm is not None and not getattr(self._jvm, "started", False):
+            # warm_jvm=False: the first adapter use pays the boot. start() is
+            # idempotent and thread-safe (may be called from a worker thread).
+            self._jvm.start()
         if self._sessions is not None:
             return
         from ghmcp.runtime.decompool import DecompPool
@@ -69,24 +73,79 @@ class GhidraBackend:
         self._project_mgr = ProjectManager(Path(self._settings.projects_dir))
         self._decompool = DecompPool(self._settings)
 
+    def _lock_timeout(self) -> float:
+        # Single source of truth: config declares the default (30.0, gt=0).
+        return self._settings.program_lock_timeout
+
+    def _locked(self, pid: str, write: bool, fn):
+        """Run `fn(entry)` under the per-program RWLock; BusyError past the
+        timeout so contention never hangs a worker thread."""
+        entry = self._sessions.get(pid)
+        lock = entry.lock
+        (lock.acquire_write if write else lock.acquire_read)(timeout=self._lock_timeout())
+        try:
+            return fn(entry)
+        finally:
+            (lock.release_write if write else lock.release_read)()
+
+    def _diff_pair(self, a_pid: str, b_pid: str):
+        """(entry_a, entry_b, release) for a two-program read.
+
+        Pids are locked in sorted order (deadlock-free; two diffs racing with
+        swapped arguments cannot deadlock). A self-diff takes one lock."""
+        if a_pid == b_pid:
+            entry = self._sessions.get(a_pid)
+            entry.lock.acquire_read(timeout=self._lock_timeout())
+            return entry, entry, entry.lock.release_read
+        a_entry = self._sessions.get(a_pid)
+        b_entry = self._sessions.get(b_pid)
+        entries = sorted(
+            (a_entry, b_entry), key=lambda e: e.pid
+        )
+        first, second = entries
+        first.lock.acquire_read(timeout=self._lock_timeout())
+        try:
+            second.lock.acquire_read(timeout=self._lock_timeout())
+        except BaseException:
+            first.lock.release_read()
+            raise
+
+        def release() -> None:
+            second.lock.release_read()
+            first.lock.release_read()
+
+        # Lock order is an implementation detail; diff direction follows the
+        # caller's requested a/b order.
+        return a_entry, b_entry, release
+
     def _write(self, entry: object, description: str, fn):
-        """Run a write inside a transaction; requite a writable session and
-        record the mutation so the decompile/store cache invalidates (plan §5.2)."""
+        """Run a write inside a transaction; requires a writable session and
+        records the mutation so the decompile/store cache invalidates (plan
+        §5.2). The per-program write lock excludes concurrent readers/writers
+        (plan §5.1); the transaction is never opened without the lock."""
         if not bool((entry.open_flags or {}).get("writable")):
             raise ReadOnly(
                 "this program was opened read-only",
                 hint="re-open with open_program(writable=true) to annotate",
             )
-        from ghmcp.runtime.txn import txn
+        entry.lock.acquire_write(timeout=self._lock_timeout())
+        try:
+            from ghmcp.runtime.txn import txn
 
-        with txn(entry.program, description):
-            result = fn()
+            with txn(entry.program, description):
+                result = fn()
+        finally:
+            entry.lock.release_write()
         entry.bump_mod(self._mod(entry.program))
         return result
 
     # ------------------------------------------------------------------ env
 
     def env(self) -> EnvInfo:
+        # Health/session environment calls can be the first adapter use when
+        # warm_jvm is disabled, so they must trigger the same lazy bootstrap as
+        # program operations.
+        self._bootstrap()
         info = self._jvm.info()
         loaders, languages, active = self._cached_registry()
         env = EnvInfo(
@@ -319,7 +378,11 @@ class GhidraBackend:
         from ghmcp.runtime import tasks
 
         tasks.wait_for_target(pid, timeout=10.0)
-        self._sessions.close(pid)
+        # Write lock: no op may still be touching the program when the Java
+        # consumer is released (otherwise use-after-release inside the JVM).
+        self._locked(
+            pid, True, lambda entry: self._sessions.close(entry.pid)
+        )
 
     def shutdown(self) -> None:
         """Release native decompiler processes and the project-dir lock.
@@ -346,23 +409,36 @@ class GhidraBackend:
 
     def save(self, pid: str) -> None:
         self._bootstrap()
-        entry = self._sessions.get(pid)
-        entry.program.getDomainFile().save(None)
-        entry.bump_mod(self._mod(entry.program))
+
+        def _do(entry: object) -> None:
+            try:
+                entry.program.getDomainFile().save(None)
+            except Exception as exc:
+                if "active transaction" in str(exc).lower():
+                    raise GhmcpError(
+                        "cannot save while analysis holds an open transaction",
+                        hint="wait for analysis(status) to report done, then save again",
+                    ) from exc
+                raise
+            entry.bump_mod(self._mod(entry.program))
+
+        self._locked(pid, True, _do)
 
     def list_open(self) -> list[ProgramInfo]:
         self._bootstrap()
         infos = []
-        for pid in self._sessions.open_pids():
-            entry = self._sessions.get(pid)
-            infos.append(
-                self._snapshot(
-                    entry.program,
-                    pid,
-                    spec=None,
-                    writable=bool(entry.open_flags.get("writable")),
-                )
+
+        def _snap(entry: object) -> ProgramInfo:
+            return self._snapshot(
+                entry.program,
+                entry.pid,
+                spec=None,
+                writable=bool(entry.open_flags.get("writable")),
+                entry=entry,
             )
+
+        for pid in self._sessions.open_pids():
+            infos.append(self._locked(pid, False, _snap))
         return infos
 
     def is_writable(self, pid: str) -> bool:
@@ -374,8 +450,8 @@ class GhidraBackend:
         return bool(entry.open_flags.get("writable"))
 
     def modification_number(self, pid: str) -> int:
-        entry = self._sessions.get(pid)
-        return self._mod(entry.program)
+        self._bootstrap()
+        return self._locked(pid, False, lambda entry: self._mod(entry.program))
 
     def select(self, pid: str) -> None:
         self._sessions.select(pid)
@@ -387,37 +463,34 @@ class GhidraBackend:
     # ------------------------------------------------------------------ read
 
     def decompile(self, pid: str, request: DecompileRequest) -> list[object]:
+        """Batch decompile: per-function locks (no whole-batch lock, so a
+        write can interleave between wave members); the lock is acquired
+        before each pool lease inside decompile_program (session.py order)."""
         self._bootstrap()
         from ghmcp.ghidra.decomp import decompile_program
 
         entry = self._sessions.get(pid)
-        return decompile_program(entry, request, self._decompool)
+        return decompile_program(entry, request, self._decompool, self._lock_timeout())
 
     def instructions(self, pid: str, request: InstructionsRequest) -> list[object]:
         self._bootstrap()
         from ghmcp.ghidra.listing import listing_program
 
-        entry = self._sessions.get(pid)
-        return listing_program(entry, request)
+        return self._locked(
+            pid, False, lambda entry: listing_program(entry, request)
+        )
 
     def read(self, pid: str, address: int, length: int) -> bytes:
         self._bootstrap()
-        entry = self._sessions.get(pid)
-        program = entry.program
-        if length <= 0:
-            raise GhmcpError("length must be positive")
-        from ghidra.program.model.mem import MemoryAccessException  # type: ignore[import-not-found]
-        from jpype import JArray, JByte
 
-        try:
-            out = JArray(JByte)(length)
-            program.getMemory().getBytes(self._addr(program, address), out)
-        except MemoryAccessException as exc:
-            raise GhmcpError(f"cannot read {length} bytes at {address:#x}: {exc}") from exc
-        try:
-            return bytes(out)
-        except Exception:
-            return bytes(bytearray(out))
+        def _do(entry: object) -> bytes:
+            if length <= 0:
+                raise GhmcpError("length must be positive")
+            from ghmcp.ghidra.game import read_bytes
+
+            return read_bytes(entry.program, address, length, side="read")
+
+        return self._locked(pid, False, _do)
 
     def read_typed(
         self, pid: str, address: int, length: int, type_name: str | None = None
@@ -425,8 +498,9 @@ class GhidraBackend:
         self._bootstrap()
         from ghmcp.ghidra.listing import typed_values
 
-        entry = self._sessions.get(pid)
-        return typed_values(entry.program, address, length, type_name)
+        return self._locked(
+            pid, False, lambda entry: typed_values(entry.program, address, length, type_name)
+        )
 
     # ------------------------------------------------------------------ xrefs/symbols (M4)
 
@@ -434,29 +508,25 @@ class GhidraBackend:
         self._bootstrap()
         from ghmcp.ghidra.refs import refs_page
 
-        entry = self._sessions.get(pid)
-        return refs_page(entry.program, request)
+        return self._locked(pid, False, lambda entry: refs_page(entry.program, request))
 
     def symbols(self, pid: str, request: SymbolQuery) -> tuple[list[object], bool]:
         self._bootstrap()
         from ghmcp.ghidra.symbols import symbols_page
 
-        entry = self._sessions.get(pid)
-        return symbols_page(entry.program, request)
+        return self._locked(pid, False, lambda entry: symbols_page(entry.program, request))
 
     def strings(self, pid: str, request: StringQuery) -> tuple[list[object], bool]:
         self._bootstrap()
         from ghmcp.ghidra.strings import strings_page
 
-        entry = self._sessions.get(pid)
-        return strings_page(entry.program, request)
+        return self._locked(pid, False, lambda entry: strings_page(entry.program, request))
 
     def call_graph(self, pid: str, request: CallGraphRequest) -> CallGraphPage:
         self._bootstrap()
         from ghmcp.ghidra.callgraph import call_graph
 
-        entry = self._sessions.get(pid)
-        return call_graph(entry, request)
+        return self._locked(pid, False, lambda entry: call_graph(entry, request))
 
     # ------------------------------------------------------------------ search (M5)
 
@@ -464,8 +534,7 @@ class GhidraBackend:
         self._bootstrap()
         from ghmcp.ghidra.search import search_page
 
-        entry = self._sessions.get(pid)
-        return search_page(entry.program, request)
+        return self._locked(pid, False, lambda entry: search_page(entry.program, request))
 
     # ------------------------------------------------------------------ scripts (M5)
 
@@ -478,7 +547,17 @@ class GhidraBackend:
         entry = self._sessions.get(pid) if pid else self._sessions.current_entry()
         if entry is None:
             raise GhmcpError("no program open for run_script", hint="open_program first")
-        return run_script(entry, kind, code, path, args)
+        # Script bodies can ALWAYS mutate via the flat API (they may open
+        # their own transactions), so every run_script runs under the
+        # EXCLUSIVE lock — a shared read lock around a possible mutator would
+        # race other readers. The session's writable flag only adds the
+        # transaction wrapper inside script.py.
+        project = self._project_mgr.project()
+        return self._locked(
+            entry.pid,
+            True,
+            lambda entry: run_script(entry, kind, code, path, args, project=project),
+        )
 
     # ------------------------------------------------------------------ write (M6)
 
@@ -487,32 +566,28 @@ class GhidraBackend:
         from ghmcp.ghidra.annotate import rename
 
         entry = self._sessions.get(pid)
-        self._write(entry, "ghmcp: rename", lambda: rename(entry.program, request))
+        self._write(entry, "ghmcp: rename", lambda: rename(entry, request))
 
     def set_prototype(self, pid: str, request: PrototypeRequest) -> None:
         self._bootstrap()
         from ghmcp.ghidra.annotate import set_prototype
 
         entry = self._sessions.get(pid)
-        self._write(
-            entry, "ghmcp: set_prototype", lambda: set_prototype(entry.program, request)
-        )
+        self._write(entry, "ghmcp: set_prototype", lambda: set_prototype(entry, request))
 
     def set_comment(self, pid: str, request: CommentRequest) -> None:
         self._bootstrap()
         from ghmcp.ghidra.annotate import set_comment
 
         entry = self._sessions.get(pid)
-        self._write(entry, "ghmcp: set_comment", lambda: set_comment(entry.program, request))
+        self._write(entry, "ghmcp: set_comment", lambda: set_comment(entry, request))
 
     def define_types(self, pid: str, c_decl: str) -> list[str]:
         self._bootstrap()
         from ghmcp.ghidra.annotate import define_types
 
         entry = self._sessions.get(pid)
-        return self._write(
-            entry, "ghmcp: define_types", lambda: define_types(entry.program, c_decl)
-        )
+        return self._write(entry, "ghmcp: define_types", lambda: define_types(entry, c_decl))
 
     def apply_type(self, pid: str, address: int, c_type: str, variable: str | None) -> None:
         self._bootstrap()
@@ -522,22 +597,20 @@ class GhidraBackend:
         self._write(
             entry,
             "ghmcp: apply_type",
-            lambda: apply_type(entry.program, address, c_type, variable),
+            lambda: apply_type(entry, address, c_type, variable),
         )
 
     def list_types(self, pid: str) -> list[str]:
         self._bootstrap()
         from ghmcp.ghidra.annotate import list_types
 
-        entry = self._sessions.get(pid)
-        return list_types(entry.program)
+        return self._locked(pid, False, lambda entry: list_types(entry))
 
     def get_type(self, pid: str, name: str) -> dict:
         self._bootstrap()
         from ghmcp.ghidra.annotate import get_type
 
-        entry = self._sessions.get(pid)
-        return get_type(entry.program, name)
+        return self._locked(pid, False, lambda entry: get_type(entry, name))
 
     # ------------------------------------------------------------------ game specials (M7)
 
@@ -545,15 +618,16 @@ class GhidraBackend:
         self._bootstrap()
         from ghmcp.ghidra.game import memory_map
 
-        entry = self._sessions.get(pid)
-        return memory_map(entry)
+        return self._locked(pid, False, lambda entry: memory_map(entry))
 
     def create_block(self, pid: str, name: str, address: int, size: int, flags: str) -> None:
         self._bootstrap()
         from ghmcp.ghidra.game import create_block
 
         entry = self._sessions.get(pid)
-        self._write(entry, "ghmcp: create_block", lambda: create_block(entry, name, address, size, flags))
+        self._write(
+            entry, "ghmcp: create_block", lambda: create_block(entry, name, address, size, flags)
+        )
 
     def rebase(self, pid: str, new_base: int) -> None:
         self._bootstrap()
@@ -566,23 +640,32 @@ class GhidraBackend:
         self._bootstrap()
         from ghmcp.ghidra.game import diff_functions
 
-        return diff_functions(self._sessions.get(a_pid), self._sessions.get(b_pid))
+        a, b, release = self._diff_pair(a_pid, b_pid)
+        try:
+            return diff_functions(a, b)
+        finally:
+            release()
 
     def diff_bytes(self, a_pid: str, b_pid: str, start: int, end: int) -> dict:
         self._bootstrap()
         from ghmcp.ghidra.game import diff_bytes
 
-        return diff_bytes(
-            self._sessions.get(a_pid).program, self._sessions.get(b_pid).program, start, end
-        )
+        a, b, release = self._diff_pair(a_pid, b_pid)
+        try:
+            return diff_bytes(a.program, b.program, start, end, a.pid, b.pid)
+        finally:
+            release()
 
     def analysis_state(self, pid: str) -> str:
         self._bootstrap()
         from ghmcp.ghidra.game import analysis_state
 
-        return analysis_state(self._sessions.get(pid))
+        return self._locked(pid, False, lambda entry: analysis_state(entry))
 
     def run_analysis(self, pid: str, options: dict) -> None:
+        """Synchronous analysis: deliberately NOT under the program lock —
+        analysis is incremental under Ghidra's own locks and stalls readers
+        for minutes otherwise (see session.py: analysis/exclusion note)."""
         self._bootstrap()
         from ghmcp.ghidra.game import run_analysis
 
@@ -594,7 +677,7 @@ class GhidraBackend:
         self._bootstrap()
         from ghmcp.ghidra.game import analysis_options
 
-        return analysis_options(self._sessions.get(pid))
+        return self._locked(pid, False, lambda entry: analysis_options(entry))
 
     # ------------------------------------------------------------------ tasks (M7)
 
@@ -646,6 +729,7 @@ class GhidraBackend:
         spec: OpenSpec | None = None,
         writable: bool | None = None,
         analysis_task_id: str | None = None,
+        entry: object | None = None,
     ) -> ProgramInfo:
         fmt = "unknown"
         lang = ""
@@ -664,19 +748,32 @@ class GhidraBackend:
             blocks = [str(b.getName()) for b in block_iter]
         except Exception:
             pass
-        try:
-            st = program.getSymbolTable()
-            ext = st.getExternalEntryPoints() if hasattr(st, "getExternalEntryPoints") else None
-            if ext:
-                for s in ext:
-                    try:
-                        entry_points.append(int(s.getAddress().getOffset()))
-                    except Exception:
-                        continue
-        except Exception:
-            pass
+        mod = self._mod(program)
+        entry_cache = getattr(entry, "snap_cache", None)
+        if entry is not None and entry_cache is not None and entry_cache.get("mod") == mod:
+            entry_points = list(entry_cache["entry_points"])
+        if not entry_points:
+            try:
+                st = program.getSymbolTable()
+                ext = (
+                    st.getExternalEntryPoints() if hasattr(st, "getExternalEntryPoints") else None
+                )
+                if ext:
+                    for s in ext:
+                        try:
+                            entry_points.append(int(s.getAddress().getOffset()))
+                        except Exception:
+                            continue
+            except Exception:
+                pass
         counts = self._counts(program)
-        self._entry_points_fallback(program, entry_points)
+        # Fallback costs one full symbol-table pass: skip when analysis has not
+        # produced functions (fresh import) and cache on the entry by mod so
+        # list_open() never repeats it.
+        if not entry_points and counts["function_count"]:
+            self._entry_points_fallback(program, entry_points)
+        if entry is not None:
+            entry.snap_cache = {"mod": mod, "entry_points": list(entry_points)}
         return ProgramInfo(
             pid=pid,
             alias=(spec.alias if spec is not None else None) or None,

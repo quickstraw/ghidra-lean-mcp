@@ -14,7 +14,39 @@ from ghmcp.services import annotate as annotate_svc
 def _ctx(writable: bool = True) -> ServiceCtx:
     adapter = FakeAdapter()
     pid = adapter.open(OpenSpec(path="test.bin", writable=writable)).pid
-    return ServiceCtx(adapter=adapter, current_program=pid)
+    adapter.select(pid)
+    return ServiceCtx(adapter=adapter)
+
+
+# ------------------------------------------------------------------ field parser
+
+
+class _F:
+    pass
+
+
+def test_field_defs_supports_pointers_and_multiword():
+    from ghmcp.ghidra.annotate import _field_defs
+
+    fields = _field_defs("int x; char *name; unsigned int y; int *ptr; char **pp")
+    assert fields == [
+        {"type": "int", "name": "x"},
+        {"type": "char *", "name": "name"},
+        {"type": "unsigned int", "name": "y"},
+        {"type": "int *", "name": "ptr"},
+        {"type": "char **", "name": "pp"},
+    ]
+
+
+def test_field_defs_raises_instead_of_silent_drop():
+    from ghmcp.ghidra.annotate import _field_defs
+
+    with pytest.raises(GhmcpError, match="unsupported field"):
+        _field_defs("int arr[4]")
+    with pytest.raises(GhmcpError, match="unsupported field"):
+        _field_defs("int a, b")
+    with pytest.raises(GhmcpError, match="unsupported field"):
+        _field_defs("int field = 3")
 
 
 # ------------------------------------------------------------------ rename
