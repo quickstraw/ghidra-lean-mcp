@@ -17,6 +17,11 @@ dependencies = [
 [project.scripts]
 ghmcp = "ghmcp.__main__:main"
 
+[project.urls]
+Homepage = "https://github.com/quickstraw/ghidra-lean-mcp"
+Repository = "https://github.com/quickstraw/ghidra-lean-mcp"
+Documentation = "https://github.com/quickstraw/ghidra-lean-mcp#readme"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
